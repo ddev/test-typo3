@@ -3,8 +3,11 @@
 nbproject
 /var/*
 !/var/labels
-/public/*
-!/public/.htaccess
+
+# We need some of public
+# /public/*
+/public/fileadmin
+/public/typo3temp
 
 # .ddev is not normally gitignored - it has its own .gitignore
 # But in this case we don't want it to creep into this test

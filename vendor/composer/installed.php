@@ -3,7 +3,7 @@
         'name' => 'typo3/cms-base-distribution',
         'pretty_version' => 'dev-main',
         'version' => 'dev-main',
-        'reference' => '89f9a9c0d2c7bc600011087a3a1e920a036f8fa4',
+        'reference' => '4c5ae19200af36eb2a0ea89a15563d27767412f5',
         'type' => 'project',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -772,7 +772,7 @@
         'typo3/cms-base-distribution' => array(
             'pretty_version' => 'dev-main',
             'version' => 'dev-main',
-            'reference' => '89f9a9c0d2c7bc600011087a3a1e920a036f8fa4',
+            'reference' => '4c5ae19200af36eb2a0ea89a15563d27767412f5',
             'type' => 'project',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),
