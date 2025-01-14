@@ -6,3 +6,8 @@ nbproject
 /vendor
 /public/*
 !/public/.htaccess
+
+# .ddev is not normally gitignored - it has its own .gitignore
+# But in this case we don't want it to creep into this test
+# which will be doing `ddev config` itself
+.ddev
