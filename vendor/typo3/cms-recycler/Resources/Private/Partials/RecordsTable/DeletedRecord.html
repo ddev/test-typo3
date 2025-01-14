@@ -1,0 +1,136 @@
+<html
+    xmlns:f="http://typo3.org/ns/TYPO3/CMS/Fluid/ViewHelpers"
+    xmlns:be="http://typo3.org/ns/TYPO3/CMS/Backend/ViewHelpers"
+    xmlns:core="http://typo3.org/ns/TYPO3/CMS/Core/ViewHelpers"
+    data-namespace-typo3-fluid="true"
+>
+<tr
+    data-uid="{record.uid}"
+    data-table="{table}"
+    data-recordtitle="{record.title}"
+    data-parent-deleted="{record.isParentDeleted}"
+    data-multi-record-selection-element="true"
+>
+    <td class="col-checkbox">
+        <span class="form-check form-check-type-toggle">
+            <input class="form-check-input t3js-multi-record-selection-check" type="checkbox">
+        </span>
+    </td>
+    <td class="col-path">{record.icon -> f:format.raw()} {record.title}</td>
+    <td class="col-time">{record.uid}</td>
+    <td class="col-path">{record.pageTitle}</td>
+    <td class="col-time">{record.pid}</td>
+    <td class="col-datetime">{record.tstamp}</td>
+    <td class="col-control">
+        <div class="btn-group">
+            <a
+                class="btn btn-default"
+                data-action="undo"
+                title="{f:translate(key: 'LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:button.undo')}"
+                role="button"
+            >
+                <core:icon identifier="actions-edit-undo" />
+            </a>
+            <f:if condition="{allowDelete}">
+                <a
+                    class="btn btn-default"
+                    data-action="delete"
+                    title="{f:translate(key: 'LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:button.delete')}"
+                    role="button"
+                >
+                    <core:icon identifier="actions-edit-delete" />
+                </a>
+            </f:if>
+        </div>
+        <div class="btn-group">
+            <button
+                class="btn btn-default"
+                type="button"
+                data-action="expand"
+                data-bs-toggle="collapse"
+                data-bs-target="#{record.table}_{record.uid}"
+                title="{f:translate(key: 'LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:button.expand')}"
+            >
+                <core:icon identifier="actions-document-info" />
+            </button>
+        </div>
+    </td>
+</tr>
+<tr class="collapse table-active" id="{record.table}_{record.uid}">
+    <td></td>
+    <td colspan="6" class="p-0">
+        <table class="table table-active table-hover">
+            <tbody>
+                <tr>
+                    <th scope="row" class="col-recordtitle"><f:translate key="LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:table.header.crdate" /></th>
+                    <td>{record.crdate}</td>
+                </tr>
+                <tr>
+                    <th scope="row" class="col-recordtitle"><f:translate key="LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:table.header.createdBy" /></th>
+                    <td>
+                        <f:render
+                            section="backendUserData"
+                            arguments="{
+                                backendUserUid: record.backendUserUid,
+                                backendUser: record.backendUser.0
+                            }"
+                        />
+                    </td>
+                </tr>
+                <f:if condition="{record.deletedBackendUser}">
+                    <tr>
+                        <th scope="row" class="col-recordtitle"><f:translate key="LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:table.header.deletedBy" /></th>
+                        <td>
+                            <f:render
+                                section="backendUserData"
+                                arguments="{
+                                    backendUserUid: record.deletedBackendUserUid,
+                                    backendUser: record.deletedBackendUser.0
+                                }"
+                            />
+                        </td>
+                    </tr>
+                </f:if>
+                <tr>
+                    <th scope="row" class="col-recordtitle"><f:translate key="LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:table.header.path" /></th>
+                    <td class="text-break">{record.path -> f:format.raw()}</td>
+                </tr>
+            </tbody>
+        </table>
+    </td>
+</tr>
+
+<f:section name="backendUserData">
+    <div class="media">
+        <f:if condition="{backendUserUid} && {backendUser.username}">
+            <div class="media-left">
+                <be:avatar backendUser="{backendUserUid}" showIcon="true" />
+            </div>
+        </f:if>
+        <div class="media-body">
+            <f:if condition="{backendUser.realName}">
+                <f:then>
+                    {backendUser.realName}
+                    <f:if condition="{backendUser.username}">
+                        <div class="text-muted">
+                            ({backendUser.username})
+                        </div>
+                    </f:if>
+                </f:then>
+                <f:else if="{backendUser.username}">
+                    {backendUser.username}
+                </f:else>
+                <f:else>
+                    <f:translate
+                        key="LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:record.userDeleted"
+                        arguments="{
+                            0: '{backendUserUid}'
+                        }"
+                    />
+                </f:else>
+            </f:if>
+        </div>
+    </div>
+</f:section>
+
+</html>

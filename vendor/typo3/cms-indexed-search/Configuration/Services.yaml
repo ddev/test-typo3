@@ -1,0 +1,14 @@
+services:
+  _defaults:
+    autowire: true
+    autoconfigure: true
+    public: false
+
+  TYPO3\CMS\IndexedSearch\:
+    resource: '../Classes/*'
+
+  TYPO3\CMS\IndexedSearch\Domain\Repository\IndexSearchRepository:
+    shared: false
+
+  TYPO3\CMS\IndexedSearch\Indexer:
+    shared: false

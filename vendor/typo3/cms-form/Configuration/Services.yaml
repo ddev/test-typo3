@@ -1,0 +1,21 @@
+services:
+  _defaults:
+    autowire: true
+    autoconfigure: true
+    public: false
+
+  TYPO3\CMS\Form\:
+    resource: '../Classes/*'
+    exclude: '../Classes/{Domain/Model}'
+
+  TYPO3\CMS\Form\SoftReference\FormPersistenceIdentifierSoftReferenceParser:
+    tags:
+      - name: softreference.parser
+        parserKey: formPersistenceIdentifier
+
+  TYPO3\CMS\Form\Mvc\Property\TypeConverter\FormDefinitionArrayConverter:
+    tags:
+      - name: extbase.type_converter
+        priority: 10
+        target: TYPO3\CMS\Form\Type\FormDefinitionArray
+        sources: string

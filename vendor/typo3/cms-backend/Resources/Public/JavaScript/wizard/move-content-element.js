@@ -1,0 +1,13 @@
+/*
+ * This file is part of the TYPO3 CMS project.
+ *
+ * It is free software; you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License, either version 2
+ * of the License, or any later version.
+ *
+ * For the full copyright and license information, please read the
+ * LICENSE.txt file that was distributed with this source code.
+ *
+ * The TYPO3 project - inspiring people to share!
+ */
+import RegularEvent from"@typo3/core/event/regular-event.js";import DocumentService from"@typo3/core/document-service.js";import AjaxDataHandler from"@typo3/backend/ajax-data-handler.js";import Modal from"@typo3/backend/modal.js";import Notification from"@typo3/backend/notification.js";import ImmediateAction from"@typo3/backend/action-button/immediate-action.js";import{lll}from"@typo3/core/lit-helper.js";import Viewport from"@typo3/backend/viewport.js";export class MoveContentElement{constructor(){this.initialize()}async initialize(){await DocumentService.ready(),this.registerEvents(document.querySelector(".element-browser-body"))}registerEvents(e){new RegularEvent("change",(async e=>{const t=e.target.checked?lll("copyElementToHere"):lll("moveElementToHere");document.querySelectorAll('[data-action="paste"]').forEach((e=>{e.querySelector("span.t3js-button-label").textContent=t}))})).delegateTo(e,"#makeCopy"),new RegularEvent("click",(async(e,t)=>{const o=document.querySelector("#makeCopy"),n=document.querySelector("#elementRecordTitle").value,a=document.querySelector("#pageRecordTitle").value,i=document.querySelector("#pageUid").value,l=new URL(window.location.href),r=new URL(l.searchParams.get("returnUrl"),window.origin),c=o.checked,m=c?"copy":"move",s={cmd:{tt_content:{[l.searchParams.get("uid")]:{[m]:t.dataset.position}}}};void 0!==t.dataset.colpos&&(s.data={tt_content:{[l.searchParams.get("uid")]:{colPos:t.dataset.colpos}}}),AjaxDataHandler.process(s).then((()=>{Modal.dismiss(),Notification.success(lll(c?"moveElement.notification.elementCopied.title":"moveElement.notification.elementMoved.title"),lll(c?"moveElement.notification.elementCopied.title":"moveElement.notification.elementMoved.message").replace("%s",n),10,[{label:lll("moveElement.notification.elementPasted.action.dismiss")},{label:lll("moveElement.notification.elementPasted.action.open").replace("%s",a),action:new ImmediateAction((()=>{r.searchParams.set("id",i),Viewport.ContentContainer.setUrl(r.toString())}))}]),Viewport.ContentContainer.setUrl(r.toString())}))})).delegateTo(e,'[data-action="paste"]')}}

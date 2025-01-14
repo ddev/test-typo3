@@ -1,0 +1,118 @@
+<html
+    xmlns:core="http://typo3.org/ns/TYPO3/CMS/Core/ViewHelpers"
+    xmlns:f="http://typo3.org/ns/TYPO3/CMS/Fluid/ViewHelpers"
+    data-namespace-typo3-fluid="true"
+>
+
+<f:layout name="Module" />
+
+<f:section name="Before">
+    <f:be.pageRenderer
+        includeJavaScriptModules="{
+            0: '@typo3/backend/context-menu.js',
+            1: '@typo3/impexp/import-export.js',
+            2: '@typo3/backend/element/immediate-action-element.js'
+        }"
+    />
+    <f:variable name="args" value="{0: 'web', 1: id}" />
+    <typo3-immediate-action
+        action="TYPO3.Backend.Storage.ModuleStateStorage.update"
+        args="{args -> f:format.json() -> f:format.htmlspecialchars()}"
+    ></typo3-immediate-action>
+</f:section>
+
+<f:section name="Content">
+
+    <h1>
+        <f:translate key="LLL:EXT:impexp/Resources/Private/Language/locallang.xlf:title_import" />
+    </h1>
+    <form action="{f:be.uri(route:'tx_impexp_import')}" method="post" id="ImportExportController" enctype="multipart/form-data">
+        <input type="hidden" name="id" value="{id}" />
+        <ul class="nav nav-tabs" role="tablist">
+            <li role="presentation" class="nav-item">
+                <button
+                    type="button"
+                    class="nav-link active"
+                    data-bs-toggle="tab"
+                    data-bs-target="#import-import"
+                    aria-controls="import-import"
+                    role="tab"
+                >
+                    <f:translate key="LLL:EXT:impexp/Resources/Private/Language/locallang.xlf:importdata_import" />
+                </button>
+            </li>
+            <f:if condition="{importFolder}">
+                <li role="presentation" class="nav-item">
+                    <button
+                        type="button"
+                        class="nav-link"
+                        data-bs-toggle="tab"
+                        data-bs-target="#import-upload"
+                        aria-controls="import-upload"
+                        role="tab"
+                    >
+                        <f:translate key="LLL:EXT:impexp/Resources/Private/Language/locallang.xlf:importdata_upload" />
+                    </button>
+                </li>
+            </f:if>
+            <f:if condition="{import.metaData}">
+                <li role="presentation" class="nav-item">
+                    <button
+                        type="button"
+                        class="nav-link"
+                        data-bs-toggle="tab"
+                        data-bs-target="#import-metadata"
+                        aria-controls="import-metadata"
+                        role="tab"
+                    >
+                        <f:translate key="LLL:EXT:impexp/Resources/Private/Language/locallang.xlf:importdata_metaData_1387" />
+                    </button>
+                </li>
+            </f:if>
+            <f:if condition="{errors -> f:count()} > 0">
+                <li role="presentation" class="nav-item">
+                    <button
+                        type="button"
+                        class="nav-link"
+                        data-bs-toggle="tab"
+                        data-bs-target="#import-errors"
+                        aria-controls="import-errors"
+                        role="tab"
+                    >
+                        <f:translate key="LLL:EXT:impexp/Resources/Private/Language/locallang.xlf:importdata_messages" />
+                        <core:icon identifier="status-dialog-warning" />
+                    </button>
+                </li>
+            </f:if>
+        </ul>
+        <div class="tab-content">
+            <div role="tabpanel" class="tab-pane active" id="import-import">
+                <f:render partial="Import/Import" arguments="{_all}" />
+            </div>
+            <f:if condition="{importFolder}">
+                <div role="tabpanel" class="tab-pane" id="import-upload">
+                    <f:render partial="Import/Upload" arguments="{_all}" />
+                </div>
+            </f:if>
+            <f:if condition="{import.metaData}">
+                <div role="tabpanel" class="tab-pane" id="import-metadata">
+                    <f:render partial="Import/MetaData" arguments="{_all}" />
+                </div>
+            </f:if>
+            <f:if condition="{errors -> f:count()} > 0">
+                <div role="tabpanel" class="tab-pane" id="import-errors">
+                    <f:be.infobox state="{f:constant(name: 'TYPO3\CMS\Fluid\ViewHelpers\Be\InfoboxViewHelper::STATE_ERROR')}" disableIcon="true">
+                        <f:for each="{errors}" as="error">
+                            <p>{error}</p>
+                        </f:for>
+                    </f:be.infobox>
+                </div>
+            </f:if>
+        </div>
+
+        <f:render partial="Preview" arguments="{_all}" />
+    </form>
+
+</f:section>
+
+</html>

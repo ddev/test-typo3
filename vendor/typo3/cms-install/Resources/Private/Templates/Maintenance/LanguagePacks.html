@@ -1,0 +1,32 @@
+<html xmlns:core="http://typo3.org/ns/TYPO3/CMS/Core/ViewHelpers" data-namespace-typo3-fluid="true">
+
+<div
+    class="t3js-module-content"
+    data-language-packs-activate-language-token="{languagePacksActivateLanguageToken}"
+    data-language-packs-deactivate-language-token="{languagePacksDeactivateLanguageToken}"
+    data-language-packs-update-pack-token="{languagePacksUpdatePackToken}"
+    data-language-packs-update-iso-times-token="{languagePacksUpdateIsoTimesToken}"
+    data-configuration-is-writable="{f:if(condition: isWritable, then: 'true', else: 'false')}"
+>
+    <p>
+        Shows an overview of available languages excluding the default (English) language.
+        You can activate and deactivate additional localizations and to update language packs from the official
+        <a target="_blank" rel="noreferrer" href="https://localize.typo3.org/xliff/status.html">
+            <u>TYPO3 translation server</u></a>.
+    </p>
+    <p>
+        Miss a translation or want to improve or add translations? Read the
+        <a target="_blank" rel="noreferrer" href="https://docs.typo3.org/m/typo3/reference-coreapi/main/en-us/ApiOverview/Localization/TranslationServer/Crowdin.html">
+            <u>documentation</u></a> on how to easily contribute through
+        <a target="_blank" rel="noreferrer" href="https://crowdin.com/profile/TYPO3">
+            <u>Crowdin</u></a>.
+    </p>
+
+    <f:render partial="Generic/ConfigurationNotWritable" arguments="{_all}"/>
+
+    <div class="t3js-languagePacks-notifications"></div>
+    <div class="t3js-languagePacks-output"></div>
+    <div class="t3js-languagePacks-mainContent"></div>
+</div>
+
+</html>

@@ -1,0 +1,42 @@
+<html xmlns:f="http://typo3.org/ns/TYPO3/CMS/Fluid/ViewHelpers" data-namespace-typo3-fluid="true">
+
+<div class="panel panel-default">
+    <div class="panel-heading" role="tab">
+        <div class="panel-heading-row">
+            <button
+                class="panel-button collapsed"
+                type="button"
+                data-bs-toggle="collapse"
+                data-bs-parent="#accordion"
+                data-bs-target="#collapseFive"
+                aria-controls="collapseFive"
+                aria-expanded="false"
+                id="headingFive"
+            >
+                <div class="panel-title">
+                    <strong>Mail handling settings</strong>
+                </div>
+                <span class="caret"></span>
+            </button>
+        </div>
+    </div>
+    <div id="collapseFive" class="panel-collapse collapse" role="tabpanel" aria-labelledby="headingFive">
+        <div class="panel-body">
+            <p>
+                Mailer agent in TYPO3 CMS can use the sendmail command line tool
+                if transport is configured to sendmail. The tool path needs to be
+                configured correctly depending on the binary that is available
+                on the system.
+            </p>
+            <p>
+                This module detects the current sendmail path from PHP settings
+                and allows to set the correct value in TYPO3 settings.
+            </p>
+            <f:for each="{feature.presetsOrderedByPriority}" as="preset">
+                <f:render partial="Settings/Presets/{feature.name}/{preset.name}" arguments="{_all}" />
+            </f:for>
+        </div>
+    </div>
+</div>
+
+</html>

@@ -1,0 +1,6 @@
+# Allow the <iframe> tag with all attributes, all classes and all styles:
+editor:
+  config:
+    htmlSupport:
+      allow:
+        - { name: 'iframe', attributes: true, classes: true, styles: true }
