@@ -92,6 +92,7 @@ class ServiceProvider extends AbstractServiceProvider
             Localization\LanguageStore::class => self::getLanguageStore(...),
             Localization\Locales::class => self::getLocales(...),
             Localization\LocalizationFactory::class => self::getLocalizationFactory(...),
+            Mail\Mailer::class => self::getMailer(...),
             Mail\TransportFactory::class => self::getMailTransportFactory(...),
             Messaging\FlashMessageService::class => self::getFlashMessageService(...),
             Middleware\ResponsePropagation::class => self::getResponsePropagationMiddleware(...),
@@ -414,6 +415,14 @@ class ServiceProvider extends AbstractServiceProvider
         ]);
     }
 
+    public static function getMailer(ContainerInterface $container): Mail\Mailer
+    {
+        return self::new($container, Mail\Mailer::class, [
+            null,
+            $container->get(EventDispatcherInterface::class),
+        ]);
+    }
+
     public static function getMailTransportFactory(ContainerInterface $container): Mail\TransportFactory
     {
         return self::new($container, Mail\TransportFactory::class, [
@@ -629,7 +638,12 @@ class ServiceProvider extends AbstractServiceProvider
 
     public static function getRuntimeCache(ContainerInterface $container): FrontendInterface
     {
-        return Bootstrap::createCache('runtime');
+        $defaultBackend = Cache\Backend\TransientMemoryBackend::class;
+        $cacheBackend = $GLOBALS['TYPO3_CONF_VARS']['SYS']['caching']['cacheConfigurations']['runtime']['backend'] ?? $defaultBackend;
+        if (!array_key_exists(Cache\Backend\TransientBackendInterface::class, class_implements($cacheBackend))) {
+            $cacheBackend = $defaultBackend;
+        }
+        return Bootstrap::createCache('runtime', false, $cacheBackend);
     }
 
     public static function getCoreMiddlewares(ContainerInterface $container): \ArrayObject
