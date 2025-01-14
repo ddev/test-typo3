@@ -1,0 +1,14 @@
+base: /
+languages:
+  -
+    title: English
+    enabled: true
+    locale: en_US.UTF-8
+    hreflang: en-US
+    base: /
+    websiteTitle: ''
+    navigationTitle: English
+    flag: us
+    languageId: 0
+rootPageId: 86
+websiteTitle: ''
