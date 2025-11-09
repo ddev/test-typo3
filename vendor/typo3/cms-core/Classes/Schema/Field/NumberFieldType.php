@@ -27,8 +27,18 @@ final readonly class NumberFieldType extends AbstractFieldType
         return 'number';
     }
 
+    public function isSearchable(): bool
+    {
+        return $this->getFormat() === 'integer';
+    }
+
     public function getFormat(): ?string
     {
         return $this->configuration['format'] ?? '';
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
     }
 }

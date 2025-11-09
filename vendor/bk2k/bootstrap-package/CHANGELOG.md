@@ -1,3 +1,85 @@
+# 15.0.4
+
+## FEATURE
+
+- 8f9e374b [FEATURE] Add bluesky, discord, mastodon, researchgate and whatsapp to social media (#1564)
+
+## TASK
+
+- 9b5a1b2d [TASK] Use type cast (#1589)
+- 51400500 [TASK] Replace deprecated apple-mobile-web-app-capable with mobile-web-app-capable meta tag (#1563)
+- b75f9a99 [TASK] Format InlineViewHelper correctly (#1570)
+- ad2aa3f7 [TASK] Update node dependencies and bootstrap (#1587)
+- 0037e17d [TASK] Run publish on ubuntu-latest
+
+## Contributors
+
+- Benjamin Kott
+- Patrick Lenk
+- Simon Schaufelberger
+- Simon Woll
+
+# 15.0.3
+
+## FEATURE
+
+- 9bb0719c [FEATURE] Introduce event to modify icon providers (#1582)
+
+## TASK
+
+- 49679b12 [TASK] Fix PHPStan issue and PHP 8.1 compatibility (#1584)
+- 3b05a548 [TASK] Remove PHPUnit deprecations (#1583)
+
+## BUGFIX
+
+- 09f3cc89 [BUGFIX] Correct include paths old backend layout tsconfig includes
+- 84621cea [BUGFIX] Do not treat form element grid column as section
+
+## Contributors
+
+- Benjamin Kott
+- Marvin Buchmann
+
+# 15.0.2
+
+## BUGFIX
+
+- 4fffb57c [BUGFIX] Correct spelling in folder name for Bootstrap 5 Set - fixes #1561
+- 124407bb [BUGFIX] Correct Google Fonts TypoScript path in site set (#1560)
+- 493e840f [BUGFIX] Move pagets to their respected site sets
+
+## Contributors
+
+- Benjamin Kott
+- Uwe W.
+
+# 15.0.1
+
+## TASK
+
+- 5cf6ae2d [TASK] Raise ci node version to 22
+- 905220dd [TASK] Migrate from node-sass to sass
+
+## BUGFIX
+
+- e8de10ba [BUGFIX] Drop base table class
+- deb5ba4a [BUGFIX] Migrate Table CKEditor plugin
+- 1056a391 [BUGFIX] Migrate Text Indent CKEditor plugin
+- 15bb7f31 [BUGFIX] Migrate Text Columns CKEditor plugin
+- c9c4bbc8 [BUGFIX] Migrate Box CKEditor plugin
+- a9bd7cdf [BUGFIX] Migrate Address CKEditor plugin
+- cf951913 [BUGFIX] Do not render empty image galleries for textpic above and below (#1442)
+- a90e3fc6 [BUGFIX] Respect carousel type specific responsive image settings (#1552)
+- 4600e4d6 [BUGFIX] Correct settings defaults for templateRootPaths (#1553)
+- b6c2badd [BUGFIX] Correct settings definition for gallery class settings - #1541
+
+## Contributors
+
+- Benjamin Kott
+- Johannes Quack
+- T. Legat
+- Uwe
+
 # 15.0.0
 
 ## BREAKING

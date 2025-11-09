@@ -96,13 +96,6 @@ class UpgradeController extends AbstractController
      */
     protected $coreVersionService;
 
-    public function __construct(
-        protected readonly PackageManager $packageManager,
-        private readonly LateBootService $lateBootService,
-        private readonly DatabaseUpgradeWizardsService $databaseUpgradeWizardsService,
-        private readonly FormProtectionFactory $formProtectionFactory
-    ) {}
-
     /**
      * Matcher registry of extension scanner.
      * Node visitors that implement CodeScannerInterface
@@ -203,6 +196,14 @@ class UpgradeController extends AbstractController
             'configurationFile' => 'EXT:install/Configuration/ExtensionScanner/Php/ScalarStringMatcher.php',
         ],
     ];
+
+    public function __construct(
+        protected readonly PackageManager $packageManager,
+        private readonly LateBootService $lateBootService,
+        private readonly DatabaseUpgradeWizardsService $databaseUpgradeWizardsService,
+        private readonly FormProtectionFactory $formProtectionFactory,
+        private readonly LoadTcaService $loadTcaService
+    ) {}
 
     /**
      * Main "show the cards" view
@@ -538,6 +539,7 @@ class UpgradeController extends AbstractController
     public function extensionCompatTesterLoadExtTablesAction(ServerRequestInterface $request): ResponseInterface
     {
         $brokenExtensions = [];
+        $this->loadTcaService->loadExtensionTablesWithoutMigration();
         $container = $this->lateBootService->getContainer();
         $backup = $this->lateBootService->makeCurrent($container);
 
@@ -660,7 +662,7 @@ class UpgradeController extends AbstractController
         }
 
         $finder = new Finder();
-        $files = $finder->files()->in($extensionBasePath)->name('*.php')->sortByName();
+        $files = $finder->files()->ignoreUnreadableDirs()->in($extensionBasePath)->name('*.php')->sortByName();
         // A list of file names relative to extension directory
         $relativeFileNames = [];
         foreach ($files as $file) {
@@ -690,7 +692,7 @@ class UpgradeController extends AbstractController
         $documentationFile = new DocumentationFile();
         $finder = new Finder();
         $restFilesBasePath = ExtensionManagementUtility::extPath('core') . 'Documentation/Changelog';
-        $restFiles = $finder->files()->in($restFilesBasePath);
+        $restFiles = $finder->files()->ignoreUnreadableDirs()->in($restFilesBasePath);
         $fullyScannedRestFilesNotAffected = [];
         foreach ($restFiles as $restFile) {
             // Skip files in "8.x" directory
@@ -807,7 +809,7 @@ class UpgradeController extends AbstractController
             $preparedHit['restFiles'] = [];
             foreach ($match['restFiles'] as $fileName) {
                 $finder = new Finder();
-                $restFileLocation = $finder->files()->in($restFilesBasePath)->name($fileName);
+                $restFileLocation = $finder->files()->ignoreUnreadableDirs()->in($restFilesBasePath)->name($fileName);
                 if ($restFileLocation->count() !== 1) {
                     throw new \RuntimeException(
                         'ResT file ' . $fileName . ' not found or multiple files found.',
@@ -850,8 +852,7 @@ class UpgradeController extends AbstractController
     {
         $view = $this->initializeView($request);
         $messageQueue = new FlashMessageQueue('install');
-        $loadTcaService = GeneralUtility::makeInstance(LoadTcaService::class);
-        $loadTcaService->loadExtensionTablesWithoutMigration();
+        $this->loadTcaService->loadExtensionTablesWithoutMigration();
         $baseTca = $GLOBALS['TCA'];
         $container = $this->lateBootService->getContainer();
         $backup = $this->lateBootService->makeCurrent($container);
@@ -861,7 +862,7 @@ class UpgradeController extends AbstractController
             $extensionKey = $package->getPackageKey();
             $extTablesPath = $package->getPackagePath() . 'ext_tables.php';
             if (@file_exists($extTablesPath)) {
-                $loadTcaService->loadSingleExtTablesFile($extensionKey);
+                $this->loadTcaService->loadSingleExtTablesFile($extensionKey);
                 $newTca = $GLOBALS['TCA'];
                 if ($newTca !== $baseTca) {
                     $messageQueue->enqueue(new FlashMessage(
@@ -894,7 +895,7 @@ class UpgradeController extends AbstractController
     {
         $view = $this->initializeView($request);
         $messageQueue = new FlashMessageQueue('install');
-        GeneralUtility::makeInstance(LoadTcaService::class)->loadExtensionTablesWithoutMigration();
+        $this->loadTcaService->loadExtensionTablesWithoutMigration();
         $tcaMigration = GeneralUtility::makeInstance(TcaMigration::class);
         $GLOBALS['TCA'] = $tcaMigration->migrate($GLOBALS['TCA']);
         $tcaMessages = $tcaMigration->getMessages();

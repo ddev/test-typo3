@@ -22,6 +22,7 @@ use TYPO3\CMS\Core\Schema\Field\DateTimeFieldType;
 use TYPO3\CMS\Core\Schema\Field\FieldTypeInterface;
 use TYPO3\CMS\Core\Schema\Field\FolderFieldType;
 use TYPO3\CMS\Core\Schema\Field\RelationalFieldTypeInterface;
+use TYPO3\CMS\Core\Schema\Field\StaticSelectFieldType;
 use TYPO3\CMS\Core\Schema\RelationshipType;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Extbase\Persistence\Generic\Mapper\ColumnMap\Relation;
@@ -65,9 +66,11 @@ readonly class ColumnMapFactory
         // @todo Why type "input" - shouldn't we better throw an exception here?
         $columnMap->setType(TableColumnType::tryFrom($field->getType()) ?? TableColumnType::INPUT);
         if ($field instanceof DateTimeFieldType) {
+            $columnMap->setDateTimeFormat($field->getFormat());
             $columnMap->setDateTimeStorageFormat($field->getPersistenceType());
         }
         $columnMap = $this->setRelations($columnMap, $field, $type, $elementType);
+        $columnMap->setIsNullable($field->isNullable());
         return $columnMap;
     }
 
@@ -112,12 +115,19 @@ readonly class ColumnMapFactory
 
         // @todo we should get rid of the "maxitems" and "renderType" cases here and rely purely on
         //       the evaluated relationship type -> to be consistent with all non extbase components.
-        if ($field instanceof RelationalFieldTypeInterface
-            && $field->getRelationshipType()->hasMany()
-            && (
-                !$field->isType(TableColumnType::GROUP, TableColumnType::SELECT)
-                || ($field->isType(TableColumnType::GROUP) && (!isset($columnConfiguration['maxitems']) || $columnConfiguration['maxitems'] > 1))
-                || ($field->isType(TableColumnType::SELECT) && (($columnConfiguration['renderType'] ?? '') !== 'selectSingle' || (int)($columnConfiguration['maxitems'] ?? 0) > 1))
+        if (
+            (
+                $field instanceof RelationalFieldTypeInterface
+                && $field->getRelationshipType()->hasMany()
+                && (
+                    !$field->isType(TableColumnType::GROUP, TableColumnType::SELECT)
+                    || ($field->isType(TableColumnType::GROUP) && (!isset($columnConfiguration['maxitems']) || $columnConfiguration['maxitems'] > 1))
+                    || ($field->isType(TableColumnType::SELECT) && (($columnConfiguration['renderType'] ?? '') !== 'selectSingle' || (int)($columnConfiguration['maxitems'] ?? 0) > 1))
+                )
+            )
+            || (
+                $field instanceof StaticSelectFieldType
+                && (int)($columnConfiguration['maxitems'] ?? 0) > 1 // @todo: Get rid of the "maxitems" and rely purely on the relationship type
             )
         ) {
             $columnMap->setTypeOfRelation(Relation::HAS_MANY);
@@ -134,10 +144,19 @@ readonly class ColumnMapFactory
     {
         $columnConfiguration = $field->getConfiguration();
         $columnMap->setTypeOfRelation(Relation::HAS_ONE);
-        // @todo "allowed" (type=group) is missing here -> can only be evaluated if single value
-        // check if foreign_table is set, which usually won't be the case for type "group" fields
-        if (!empty($columnConfiguration['foreign_table'])) {
-            $columnMap->setChildTableName($columnConfiguration['foreign_table']);
+        $childTableName = null;
+        if ($field->isType(TableColumnType::GROUP)) {
+            // TCA type="group" has no TCA property "foreign_table" and can only deal with single-table
+            // relations in extbase (no support for union types). That means `allowed` should only
+            // contain ONE table entry, as Extbase can only evaluate the first one, if multiple
+            // are defined.
+            $allowed = GeneralUtility::trimExplode(',', $columnConfiguration['allowed'] ?? '', true);
+            $childTableName = $allowed[0] ?? $columnConfiguration['foreign_table'] ?? null;
+        } elseif ($field instanceof RelationalFieldTypeInterface) {
+            $childTableName = $columnConfiguration['foreign_table'] ?? null;
+        }
+        if (!empty($childTableName)) {
+            $columnMap->setChildTableName($childTableName);
         }
         // todo: don't update column map if value(s) isn't/aren't set.
         $columnMap->setChildSortByFieldName($columnConfiguration['foreign_sortby'] ?? null);
@@ -159,10 +178,19 @@ readonly class ColumnMapFactory
     {
         $columnConfiguration = $field->getConfiguration();
         $columnMap->setTypeOfRelation(Relation::HAS_MANY);
-        // @todo "allowed" (type=group) is missing here -> can only be evaluated if single value
-        // check if foreign_table is set, which usually won't be the case for type "group" fields
-        if (!empty($columnConfiguration['foreign_table'])) {
-            $columnMap->setChildTableName($columnConfiguration['foreign_table']);
+        $childTableName = null;
+        if ($field->isType(TableColumnType::GROUP)) {
+            // TCA type="group" has no TCA property "foreign_table" and can only deal with single-table
+            // relations in extbase (no support for union types). That means `allowed` should only
+            // contain ONE table entry, as Extbase can only evaluate the first one, if multiple
+            // are defined.
+            $allowed = GeneralUtility::trimExplode(',', $columnConfiguration['allowed'] ?? '', true);
+            $childTableName = $allowed[0] ?? $columnConfiguration['foreign_table'] ?? null;
+        } elseif ($field instanceof RelationalFieldTypeInterface) {
+            $childTableName = $columnConfiguration['foreign_table'] ?? null;
+        }
+        if (!empty($childTableName)) {
+            $columnMap->setChildTableName($childTableName);
         }
         // todo: don't update column map if value(s) isn't/aren't set.
         $columnMap->setChildSortByFieldName($columnConfiguration['foreign_sortby'] ?? null);
@@ -182,10 +210,19 @@ readonly class ColumnMapFactory
     {
         $columnConfiguration = $field->getConfiguration();
         $columnMap->setTypeOfRelation(Relation::HAS_AND_BELONGS_TO_MANY);
-        // @todo "allowed" (type=group) is missing here -> can only be evaluated if single value
-        // check if foreign_table is set, which usually won't be the case for type "group" fields
-        if ($columnConfiguration['foreign_table'] ?? false) {
-            $columnMap->setChildTableName($columnConfiguration['foreign_table']);
+        $childTableName = null;
+        if ($field->isType(TableColumnType::GROUP)) {
+            // TCA type="group" has no TCA property "foreign_table" and can only deal with single-table
+            // relations in extbase (no support for union types). That means `allowed` should only
+            // contain ONE table entry, as Extbase can only evaluate the first one, if multiple
+            // are defined.
+            $allowed = GeneralUtility::trimExplode(',', $columnConfiguration['allowed'] ?? '', true);
+            $childTableName = $allowed[0] ?? $columnConfiguration['foreign_table'] ?? null;
+        } elseif ($field instanceof RelationalFieldTypeInterface) {
+            $childTableName = $columnConfiguration['foreign_table'] ?? null;
+        }
+        if (!empty($childTableName)) {
+            $columnMap->setChildTableName($childTableName);
         }
         // todo: don't update column map if value(s) isn't/aren't set.
         $columnMap->setRelationTableName($columnConfiguration['MM']);

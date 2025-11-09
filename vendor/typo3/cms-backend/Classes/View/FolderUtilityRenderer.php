@@ -47,7 +47,7 @@ class FolderUtilityRenderer
     }
 
     /**
-     * For TBE: Makes a form for creating new folders in the filemount the user is browsing.
+     * For TBE: Makes a form for creating new folders in the file mount the user is browsing.
      * The folder creation request is sent to the tce_file.php script in the core which will handle the creation.
      *
      * @param Folder $folderObject Absolute filepath on server in which to create the new folder.
@@ -91,7 +91,7 @@ class FolderUtilityRenderer
     }
 
     /**
-     * Makes an upload form for uploading files to the filemount the user is browsing.
+     * Makes an upload form for uploading files to the file mount the user is browsing.
      * The files are uploaded to the tce_file.php script in the core which will handle the upload.
      *
      * @return string HTML for an upload form.
@@ -188,7 +188,7 @@ class FolderUtilityRenderer
             $markup[] = '<input type="hidden" name="redirect" value="' . htmlspecialchars($redirectValue) . '" />';
             $markup[] = '<input type="hidden" name="data[newMedia][0][target]" value="' . htmlspecialchars($folderObject->getCombinedIdentifier()) . '" />';
             $markup[] = '<input type="hidden" name="data[newMedia][0][allowed]" value="' . htmlspecialchars(implode(',', array_keys($allowedOnlineMediaList))) . '" />';
-            $markup[] = '<h4>' . htmlspecialchars($lang->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:onlinemedia.new_media')) . '</h4>';
+            $markup[] = '<h4>' . htmlspecialchars($lang->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:online_media.new_media')) . '</h4>';
             $markup[] = '<div class="row">';
             $markup[] = '<div class="col">';
             $markup[] = '<div class="input-group">';

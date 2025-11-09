@@ -31,6 +31,7 @@ use TYPO3\CMS\Core\Context\WorkspaceAspect;
 use TYPO3\CMS\Core\Core\ApplicationInterface;
 use TYPO3\CMS\Core\Core\BootService;
 use TYPO3\CMS\Core\Core\Bootstrap;
+use TYPO3\CMS\Core\Domain\DateTimeFactory;
 use TYPO3\CMS\Core\Information\Typo3Version;
 use TYPO3\CMS\Core\Localization\LanguageServiceFactory;
 
@@ -107,7 +108,7 @@ class CommandApplication implements ApplicationInterface
         Bootstrap::initializeBackendUser(CommandLineUserAuthentication::class);
         $GLOBALS['LANG'] = $this->languageServiceFactory->createFromUserPreferences($GLOBALS['BE_USER']);
         // Make sure output is not buffered, so command-line output and interaction can take place
-        ob_clean();
+        ob_end_clean();
 
         $exitCode = $this->application->run($input, $output);
         // exit codes > 255 are not handled in UNIX
@@ -173,12 +174,7 @@ class CommandApplication implements ApplicationInterface
      */
     protected function initializeContext(): void
     {
-        $this->context->setAspect(
-            'date',
-            new DateTimeAspect(
-                (new \DateTimeImmutable())->setTimestamp($GLOBALS['EXEC_TIME'])
-            )
-        );
+        $this->context->setAspect('date', new DateTimeAspect(DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME'])));
         $this->context->setAspect('visibility', new VisibilityAspect(true, true, false, true));
         $this->context->setAspect('workspace', new WorkspaceAspect(0));
         $this->context->setAspect('backend.user', new UserAspect(null));

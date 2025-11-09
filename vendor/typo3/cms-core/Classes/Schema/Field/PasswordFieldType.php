@@ -27,8 +27,18 @@ final readonly class PasswordFieldType extends AbstractFieldType
         return 'password';
     }
 
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
     public function isHashed(): bool
     {
         return $this->configuration['hashed'] ?? true;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
     }
 }

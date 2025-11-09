@@ -23,13 +23,17 @@ use TYPO3\CMS\Core\Core\Environment;
 use TYPO3\CMS\Core\Database\Connection;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\DataHandling\DataHandler;
+use TYPO3\CMS\Core\DataHandling\TableColumnType;
 use TYPO3\CMS\Core\Exception;
 use TYPO3\CMS\Core\Resource\Exception\InsufficientFolderAccessPermissionsException;
 use TYPO3\CMS\Core\Resource\File;
 use TYPO3\CMS\Core\Resource\ResourceFactory;
+use TYPO3\CMS\Core\Resource\ResourceInstructionTrait;
 use TYPO3\CMS\Core\Resource\ResourceStorage;
 use TYPO3\CMS\Core\Resource\Security\FileNameValidator;
 use TYPO3\CMS\Core\Resource\StorageRepository;
+use TYPO3\CMS\Core\Schema\Capability\RootLevelCapability;
+use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
 use TYPO3\CMS\Core\Serializer\Typo3XmlParser;
 use TYPO3\CMS\Core\Serializer\Typo3XmlSerializerOptions;
 use TYPO3\CMS\Core\Service\FlexFormService;
@@ -49,6 +53,8 @@ use TYPO3\CMS\Impexp\Exception\PrerequisitesNotMetException;
  */
 class Import extends ImportExport
 {
+    use ResourceInstructionTrait;
+
     public const IMPORT_MODE_FORCE_UID = 'force_uid';
     public const IMPORT_MODE_AS_NEW = 'as_new';
     public const IMPORT_MODE_EXCLUDE = 'exclude';
@@ -558,7 +564,7 @@ class Import extends ImportExport
                 $fileId = md5($fileRecord['storage'] . ':' . $fileRecord['identifier_hash']);
                 if (isset($this->dat['files_fal'][$fileId]['content'])) {
                     $fileInfo = &$this->dat['files_fal'][$fileId];
-                    if (GeneralUtility::writeFile($temporaryFilePath, $fileInfo['content'])) {
+                    if (GeneralUtility::writeFile($temporaryFilePath, $fileInfo['content'], true)) {
                         clearstatcache();
                         $temporaryFile = $temporaryFilePath;
                     } else {
@@ -635,6 +641,7 @@ class Import extends ImportExport
                 ]);
 
                 try {
+                    $this->skipResourceConsistencyCheckForCommands($storage, $temporaryFile, $fileRecord['name']);
                     /** @var File $file */
                     $file = $storage->addFile($temporaryFile, $importFolder, $fileRecord['name']);
                 } catch (Exception $e) {
@@ -746,7 +753,7 @@ class Import extends ImportExport
             $this->flatInversePageTree($this->dat['header']['pagetree'], $pageList);
             foreach ($pageList as $pageUid => $_) {
                 $pid = $this->dat['header']['records']['pages'][$pageUid]['pid'] ?? null;
-                $pid = $this->importNewIdPids[$pid] ?? $this->pid;
+                $pid = $this->importNewIdPids[$pid ?? ''] ?? $this->pid;
                 $this->addSingle($importData, 'pages', (int)$pageUid, $pid);
                 unset($remainingPages[$pageUid]);
             }
@@ -850,20 +857,22 @@ class Import extends ImportExport
         if (is_array($this->dat['header']['records'] ?? null)) {
             foreach ($this->dat['header']['records'] as $table => $records) {
                 $this->addGeneralErrorsByTable($table);
+                if (!$this->tcaSchemaFactory->has($table)) {
+                    continue;
+                }
                 if ($table !== 'pages') {
+                    $schema = $this->tcaSchemaFactory->get($table);
+                    $rootLevelCapability = $schema->getCapability(TcaSchemaCapability::RestrictionRootLevel);
                     foreach ($records as $uid => $record) {
                         // PID: Set the main $this->pid, unless a NEW-id is found
                         $pid = isset($this->importMapId['pages'][$record['pid']])
                             ? (int)$this->importMapId['pages'][$record['pid']]
                             : $this->pid;
-                        if (isset($GLOBALS['TCA'][$table]['ctrl']['rootLevel'])) {
-                            $rootLevelSetting = (int)$GLOBALS['TCA'][$table]['ctrl']['rootLevel'];
-                            if ($rootLevelSetting === 1) {
-                                $pid = 0;
-                            } elseif ($rootLevelSetting === 0 && $pid === 0) {
-                                $this->addError('Error: Record type ' . $table . ' is not allowed on pid 0');
-                                continue;
-                            }
+                        if ($rootLevelCapability->getRootLevelType() === RootLevelCapability::TYPE_ONLY_ON_ROOTLEVEL) {
+                            $pid = 0;
+                        } elseif (!$rootLevelCapability->canExistOnRootLevel() && $pid === 0) {
+                            $this->addError('Error: Record type ' . $table . ' is not allowed on pid 0');
+                            continue;
                         }
                         // Add record
                         $this->addSingle($importData, $table, $uid, $pid);
@@ -1041,6 +1050,7 @@ class Import extends ImportExport
         }
 
         // Record relations
+        $schema = $this->tcaSchemaFactory->get($table);
         foreach ($this->dat['records'][$table . ':' . $uid]['rels'] as $field => &$relation) {
             switch ($relation['type'] ?? '') {
                 case 'db':
@@ -1054,15 +1064,17 @@ class Import extends ImportExport
                     // @see fixUidLocalInSysFileReferenceRecords()
                     // If it's empty or a uid to another record the FileExtensionFilter will throw an exception or
                     // delete the reference record if the file extension of the related record doesn't match.
-                    if (!($table === 'sys_file_reference' && $field === 'uid_local')
-                        && is_array($GLOBALS['TCA'][$table]['columns'][$field]['config'] ?? false)
-                    ) {
-                        $importData[$table][$ID][$field] = $this->getReferenceDefaultValue($GLOBALS['TCA'][$table]['columns'][$field]['config']);
+                    if (!($table === 'sys_file_reference' && $field === 'uid_local') && $schema->hasField($field)) {
+                        $importData[$table][$ID][$field] = $this->getReferenceDefaultValue($schema->getField($field)->getConfiguration());
                     }
+                    $translationSourceFieldName = null;
+                    if ($schema->isLanguageAware()) {
+                        $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
+                        $translationSourceFieldName = $languageCapability->getTranslationSourceField()?->getName();
+                    }
+
                     // Set to "0" for integer fields, or else we will get a db error in DataHandler persistence.
-                    if (!empty($GLOBALS['TCA'][$table]['ctrl']['translationSource'] ?? '')
-                        && $field === $GLOBALS['TCA'][$table]['ctrl']['translationSource']
-                    ) {
+                    if ($translationSourceFieldName && $field === $translationSourceFieldName) {
                         $importData[$table][$ID][$field] = 0;
                     }
                     break;
@@ -1077,7 +1089,7 @@ class Import extends ImportExport
                     // cleared, because the configuration array contains only string values, which are furthermore
                     // important for the further import, e.g. the base path.
                     if (!($table === 'sys_file_storage' && $field === 'configuration')) {
-                        $importData[$table][$ID][$field] = $this->getReferenceDefaultValue($GLOBALS['TCA'][$table]['columns'][$field]['config']);
+                        $importData[$table][$ID][$field] = $this->getReferenceDefaultValue($schema->getField($field)->getConfiguration());
                     }
                     break;
             }
@@ -1190,20 +1202,21 @@ class Import extends ImportExport
             $uid = $original['uid'];
 
             if (isset($this->importMapId[$table][$uid])) {
-                if (is_array($this->dat['records'][$table . ':' . $uid]['rels'] ?? null)) {
+                if (!$this->tcaSchemaFactory->has($table)) {
+                    $this->addError(sprintf('Error: This record does not have a TCA schema! (%s:%s)', $table, $uid));
+                } elseif (is_array($this->dat['records'][$table . ':' . $uid]['rels'] ?? null)) {
+                    $schema = $this->tcaSchemaFactory->get($table);
                     $actualUid = BackendUtility::wsMapId($table, $this->importMapId[$table][$uid]);
                     foreach ($this->dat['records'][$table . ':' . $uid]['rels'] as $field => $relation) {
                         // Field "uid_local" of sys_file_reference needs no update because the correct reference uid was already written.
                         // @see ImportExport::fixUidLocalInSysFileReferenceRecords()
-                        if (isset($relation['type']) && !($table === 'sys_file_reference' && $field === 'uid_local') && $relation['type'] === 'db' && isset($GLOBALS['TCA'][$table]['columns'][$field])) {
-                            if (is_array($relation['itemArray'] ?? null) && !empty($relation['itemArray'])) {
-                                $fieldTca = $GLOBALS['TCA'][$table]['columns'][$field];
-                                if (is_array($fieldTca['config'])) {
-                                    $actualRelations = $this->remapRelationsOfField($relation['itemArray'], $fieldTca['config'], $field);
-                                    $updateData[$table][$actualUid][$field] = implode(',', $actualRelations);
-                                } else {
-                                    $this->addError(sprintf('Error: Missing TCA "config" for field "%s:%s"', $table, $field));
-                                }
+                        if (isset($relation['type']) && !($table === 'sys_file_reference' && $field === 'uid_local') && $relation['type'] === 'db') {
+                            if (!$schema->hasField($field)) {
+                                $this->addError(sprintf('Error: Missing TCA "config" for field "%s:%s"', $table, $field));
+                            } elseif (is_array($relation['itemArray'] ?? null) && !empty($relation['itemArray'])) {
+                                $fieldInfo = $schema->getField($field);
+                                $actualRelations = $this->remapRelationsOfField($relation['itemArray'], $fieldInfo->getConfiguration(), $field);
+                                $updateData[$table][$actualUid][$field] = implode(',', $actualRelations);
                             }
                         }
                     }
@@ -1245,7 +1258,15 @@ class Import extends ImportExport
     {
         $actualRelations = [];
         foreach ($fieldRelations as $relation) {
-            if (isset($this->importMapId[$relation['table']][$relation['id']])) {
+            if (!$this->tcaSchemaFactory->has($relation['table'])) {
+                $this->addError('Lost relation due to missing TCA schema: ' . $relation['table'] . ':' . $relation['id']);
+            } elseif (isset($this->importMapId[$relation['table']][$relation['id']])) {
+                $schema = $this->tcaSchemaFactory->get($relation['table']);
+                $translationSourceFieldName = null;
+                if ($schema->isLanguageAware()) {
+                    $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
+                    $translationSourceFieldName = $languageCapability->getTranslationSourceField()?->getName();
+                }
                 $actualUid = $this->importMapId[$relation['table']][$relation['id']];
                 if ($fieldConfig['type'] === 'input' && isset($fieldConfig['wizards']['link'])) {
                     // If an input field has a relation to a sys_file record this need to be converted back to
@@ -1256,9 +1277,7 @@ class Import extends ImportExport
                     } catch (\Exception $e) {
                         $actualRelations[] = 'file:' . $actualUid;
                     }
-                } elseif (!empty($GLOBALS['TCA'][$relation['table']]['ctrl']['translationSource'] ?? '')
-                    && $field === $GLOBALS['TCA'][$relation['table']]['ctrl']['translationSource']
-                ) {
+                } elseif ($translationSourceFieldName && $field === $translationSourceFieldName) {
                     // "l10n_source" is of type "passthrough" so the "_" syntax won't be replaced.
                     $actualRelations[] = $actualUid;
                 } else {
@@ -1278,7 +1297,7 @@ class Import extends ImportExport
 
     /**
      * After all database relations have been set in the end of the import (see setRelations()) then it is time to
-     * correct all relations inside of FlexForm fields. The reason for doing this after is that the setting of relations
+     * correct all relations inside FlexForm fields. The reason for doing this after is that the setting of relations
      * may affect (quite often!) which data structure is used for the FlexForm field!
      *
      * @see setRelations()
@@ -1292,7 +1311,10 @@ class Import extends ImportExport
             $uid = $original['uid'];
 
             if (isset($this->importMapId[$table][$uid])) {
-                if (is_array($this->dat['records'][$table . ':' . $uid]['rels'] ?? null)) {
+                if (!$this->tcaSchemaFactory->has($table)) {
+                    $this->addError(sprintf('Error: This record does not appear to have a TCA schema! (%s:%s)', $table, $uid));
+                } elseif (is_array($this->dat['records'][$table . ':' . $uid]['rels'] ?? null)) {
+                    $schema = $this->tcaSchemaFactory->get($table);
                     $actualUid = BackendUtility::wsMapId($table, $this->importMapId[$table][$uid]);
                     foreach ($this->dat['records'][$table . ':' . $uid]['rels'] as $field => $relation) {
                         // Field "configuration" of sys_file_storage needs no update because it has not been removed
@@ -1302,13 +1324,16 @@ class Import extends ImportExport
                             // Re-insert temporarily removed original FlexForm data as fallback
                             // @see Import::addSingle()
                             $updateData[$table][$actualUid][$field] = $this->dat['records'][$table . ':' . $uid]['data'][$field];
-                            if (!empty($relation['flexFormRels']['db'])) {
-                                $actualRecord = BackendUtility::getRecord($table, $actualUid, '*');
-                                $fieldTca = &$GLOBALS['TCA'][$table]['columns'][$field];
-                                if (is_array($actualRecord) && is_array($fieldTca['config'] ?? null) && $fieldTca['config']['type'] === 'flex') {
+                            if (!empty($relation['flexFormRels']['db']) && $schema->hasField($field)) {
+                                $fieldInfo = $schema->getField($field);
+                                if (!$fieldInfo->isType(TableColumnType::FLEX)) {
+                                    continue;
+                                }
+                                $actualRecord = BackendUtility::getRecord($table, $actualUid);
+                                if (is_array($actualRecord)) {
                                     $flexFormTools = GeneralUtility::makeInstance(FlexFormTools::class);
                                     $dataStructureIdentifier = $flexFormTools->getDataStructureIdentifier(
-                                        $fieldTca,
+                                        ['config' => $fieldInfo->getConfiguration()],
                                         $table,
                                         $field,
                                         $actualRecord
@@ -1399,9 +1424,10 @@ class Import extends ImportExport
         $updateData = [];
 
         foreach ($this->dat['header']['records'] ?? [] as $table => $records) {
-            if (!isset($GLOBALS['TCA'][$table])) {
+            if (!$this->tcaSchemaFactory->has($table)) {
                 continue;
             }
+            $schema = $this->tcaSchemaFactory->get($table);
             foreach ($records as $uid => $record) {
                 if (is_array($record['softrefs'] ?? null)) {
                     $actualUid = BackendUtility::wsMapId($table, $this->importMapId[$table][$uid] ?? 0);
@@ -1415,14 +1441,14 @@ class Import extends ImportExport
                     }
                     // ... then process only fields which require substitution.
                     foreach ($softrefs as $field => $softrefsByField) {
-                        if (is_array($GLOBALS['TCA'][$table]['columns'][$field] ?? null)) {
-                            $fieldTca = $GLOBALS['TCA'][$table]['columns'][$field];
-                            if ($fieldTca['config']['type'] === 'flex') {
+                        if ($schema->hasField($field)) {
+                            $fieldInfo = $schema->getField($field);
+                            if ($fieldInfo->isType(TableColumnType::FLEX)) {
                                 $actualRecord = BackendUtility::getRecord($table, $actualUid, '*');
                                 if (is_array($actualRecord)) {
                                     $flexFormTools = GeneralUtility::makeInstance(FlexFormTools::class);
                                     $dataStructureIdentifier = $flexFormTools->getDataStructureIdentifier(
-                                        $fieldTca,
+                                        ['config' => $fieldInfo->getConfiguration()],
                                         $table,
                                         $field,
                                         $actualRecord
@@ -1611,7 +1637,7 @@ class Import extends ImportExport
         if (isset($this->fileIdMap[$fileID])) {
             return PathUtility::stripPathSitePrefix($this->fileIdMap[$fileID]);
         }
-        // Verify FileMount access to dir-prefix. Returns the best alternative relative path if any
+        // Verify file mount access to dir-prefix. Returns the best alternative relative path if any
         $dirPrefix = $this->resolveStoragePath($origDirPrefix);
         if ($dirPrefix !== null && (!$this->update || $origDirPrefix === $dirPrefix) && $this->checkOrCreateDir($dirPrefix)) {
             $fileHeaderInfo = $this->dat['header']['files'][$fileID];
@@ -1671,7 +1697,7 @@ class Import extends ImportExport
                     }
                     // If substitutions has been made, write the content to the file again:
                     if ($tokenSubstituted) {
-                        GeneralUtility::writeFile($newName, $tokenizedContent);
+                        GeneralUtility::writeFile($newName, $tokenizedContent, true);
                     }
                 }
                 return PathUtility::stripPathSitePrefix($newName);
@@ -1714,7 +1740,7 @@ class Import extends ImportExport
             $this->addError('ERROR: File ID "' . $fileID . '" could not be found');
             return false;
         }
-        GeneralUtility::writeFile($fileName, $this->dat['files'][$fileID]['content']);
+        GeneralUtility::writeFile($fileName, $this->dat['files'][$fileID]['content'], true);
         $this->fileIdMap[$fileID] = $fileName;
         if (hash_equals(md5((string)file_get_contents($fileName)), $this->dat['files'][$fileID]['content_md5'])) {
             return true;

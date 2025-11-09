@@ -98,6 +98,8 @@ CREATE TABLE sys_file (
 	creation_date int(11) DEFAULT '0' NOT NULL,
 	# No TCA column
 	modification_date int(11) DEFAULT '0' NOT NULL,
+	# Default int(11) too small. Keep same size (20) from earlier TYPO3 versions
+	size bigint(20) DEFAULT '0' NOT NULL,
 
 	KEY sel01 (storage,identifier_hash),
 	KEY folder (storage,folder_hash),
@@ -197,8 +199,7 @@ CREATE TABLE sys_lockedrecords (
 
 # Define table and fields since it has no TCA
 CREATE TABLE sys_refindex (
-	# @todo: Force a latin1 field to reduce primary key length, it only holds hex chars 0-9,a-f.
-	hash varchar(32) DEFAULT '' NOT NULL,
+	hash varchar(32) DEFAULT '' NOT NULL CHARACTER SET ascii COLLATE ascii_bin,
 	tablename varchar(64) DEFAULT '' NOT NULL,
 	recuid int unsigned DEFAULT 0 NOT NULL,
 	field varchar(64) DEFAULT '' NOT NULL,
@@ -254,7 +255,6 @@ CREATE TABLE sys_log (
 	log_data text,
 	event_pid int(11) DEFAULT '-1' NOT NULL,
 	workspace int(11) DEFAULT '0' NOT NULL,
-	NEWid varchar(30) DEFAULT '' NOT NULL,
 	request_id varchar(13) DEFAULT '' NOT NULL,
 	time_micro float DEFAULT '0' NOT NULL,
 	component varchar(255) DEFAULT '' NOT NULL,

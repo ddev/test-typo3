@@ -134,7 +134,13 @@ class RteHtmlParser extends HtmlParser implements LoggerAwareInterface
 
         // Dynamic configuration of blockElementList
         if (!empty($this->procOptions['blockElementList'])) {
-            $this->blockElementList = $this->procOptions['blockElementList'];
+            if (!isset($this->procOptions['blockElementList.'])) {
+                $blockElementList = GeneralUtility::trimExplode(',', $this->procOptions['blockElementList'], true);
+            } else {
+                $blockElementList = (array)$this->procOptions['blockElementList.'];
+            }
+
+            $this->blockElementList = implode(',', $blockElementList);
         }
 
         // Define which attributes are allowed on <p> tags
@@ -528,7 +534,11 @@ class RteHtmlParser extends HtmlParser implements LoggerAwareInterface
             }
             $keepTags = array_flip(GeneralUtility::trimExplode(',', $this->defaultAllowedTagsList . ',' . strtolower($keepTags), true));
             // For tags to deny, remove them from $keepTags array:
-            $denyTags = GeneralUtility::trimExplode(',', $this->procOptions['denyTags'] ?? '', true);
+            if (!isset($this->procOptions['denyTags.'])) {
+                $denyTags = GeneralUtility::trimExplode(',', $this->procOptions['denyTags'] ?? '', true);
+            } else {
+                $denyTags = $this->procOptions['denyTags.'];
+            }
             foreach ($denyTags as $dKe) {
                 unset($keepTags[$dKe]);
             }
@@ -657,7 +667,7 @@ class RteHtmlParser extends HtmlParser implements LoggerAwareInterface
                 // This was previously an option to disable called "dontConvAmpInNBSP_rte"
                 $parts[$k] = str_replace('&amp;nbsp;', '&nbsp;', $parts[$k]);
             }
-            $partFirstTagName = strtolower($this->getFirstTagName($parts[$k] ?? ''));
+            $partFirstTagName = strtolower($this->getFirstTagName($parts[$k]));
             // Wrapping the line in <p> tags if not already wrapped and does not contain an hr tag and is not allowed outside of paragraphs.
             if (!in_array($partFirstTagName, $this->allowedTagsOutsideOfParagraphs, true) && !preg_match('/<(hr)(\\s[^>\\/]*)?[[:space:]]*\\/?>/i', $partFirstTagName)) {
                 $testStr = strtolower(trim($parts[$k]));

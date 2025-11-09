@@ -32,6 +32,7 @@ use TYPO3\CMS\Backend\Utility\BackendUtility;
 use TYPO3\CMS\Backend\View\BackendViewFactory;
 use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
 use TYPO3\CMS\Core\Context\Context;
+use TYPO3\CMS\Core\Localization\LanguageService;
 use TYPO3\CMS\Core\Type\Bitmask\Permission;
 use TYPO3\CMS\Core\Utility\CsvUtility;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
@@ -102,6 +103,12 @@ class RecordListDownloadController
         if ($this->table === '') {
             throw new \RuntimeException('No table was given for downloading records', 1623941276);
         }
+
+        $backendUser = $this->getBackendUserAuthentication();
+        if (!$backendUser->check('tables_select', $this->table)) {
+            throw new AccessDeniedException('Insufficient permissions for accessing this download', 1756895674);
+        }
+
         $this->format = (string)($parsedBody['format'] ?? '');
         if ($this->format === '' || !isset(self::DOWNLOAD_FORMATS[$this->format])) {
             throw new \RuntimeException('No or an invalid download format given', 1624562166);
@@ -113,8 +120,11 @@ class RecordListDownloadController
         // Loading module configuration
         $this->modTSconfig = BackendUtility::getPagesTSconfig($this->id)['mod.']['web_list.'] ?? [];
 
+        // Loading TCEFORM for the table
+        $tsConfig = BackendUtility::getPagesTSconfig($this->id)['TCEFORM.'][$this->table . '.'] ?? null;
+        $tsConfig = is_array($tsConfig) ? $tsConfig : null;
+
         // Loading current page record and checking access
-        $backendUser = $this->getBackendUserAuthentication();
         $perms_clause = $backendUser->getPagePermsClause(Permission::PAGE_SHOW);
         $pageinfo = BackendUtility::readPageAccess($this->id, $perms_clause);
         $searchString = (string)($parsedBody['searchString'] ?? '');
@@ -122,6 +132,7 @@ class RecordListDownloadController
         if (!is_array($pageinfo) && !($this->id === 0 && $searchString !== '' && $searchLevels !== 0)) {
             throw new AccessDeniedException('Insufficient permissions for accessing this download', 1623941361);
         }
+        $rawValues = (bool)($parsedBody['rawValues'] ?? false);
 
         // Initialize database record list
         $recordList = GeneralUtility::makeInstance(DatabaseRecordList::class);
@@ -150,12 +161,24 @@ class RecordListDownloadController
 
         // Fetch and process the header row and the records
         $headerRow = $downloader->getHeaderRow($columnsToRender);
+        if (!$rawValues) {
+            foreach ($headerRow as &$headerField) {
+                $label = BackendUtility::getItemLabel($this->table, $headerField);
+                if ($label !== null) {
+                    $headerField = rtrim(trim($this->getLanguageService()->translateLabel($tsConfig[$headerField . '.']['label.'] ?? [], $tsConfig[$headerField . '.']['label'] ?? $label)), ':');
+                } elseif ($specialLabel = $this->getLanguageService()->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.' . $headerField)) {
+                    // Special label exists for this field (Probably a management field, e.g. sorting)
+                    $headerField = $specialLabel;
+                }
+            }
+            unset($headerField);
+        }
         $records = $downloader->getRecords(
             $this->table,
             $columnsToRender,
             $this->getBackendUserAuthentication(),
             $hideTranslations,
-            (bool)($parsedBody['rawValues'] ?? false)
+            $rawValues
         );
 
         $event = $this->eventDispatcher->dispatch(
@@ -375,5 +398,10 @@ class RecordListDownloadController
     protected function getBackendUserAuthentication(): BackendUserAuthentication
     {
         return $GLOBALS['BE_USER'];
+    }
+
+    protected function getLanguageService(): LanguageService
+    {
+        return $GLOBALS['LANG'];
     }
 }

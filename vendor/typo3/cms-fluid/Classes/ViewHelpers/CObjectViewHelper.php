@@ -29,57 +29,16 @@ use TYPO3Fluid\Fluid\Core\ViewHelper\AbstractViewHelper;
 use TYPO3Fluid\Fluid\Core\ViewHelper\Exception;
 
 /**
- * This ViewHelper renders CObjects from the global TypoScript configuration.
+ * ViewHelper to render CObjects (objects containing rendering definitions for records/elements),
+ * using the global TypoScript configuration.
  *
- * .. note::
- *    You have to ensure proper escaping (htmlspecialchars/intval/etc.) on your own!
+ * ```
+ *   <f:cObject typoscriptObjectPath="lib.someLibObject" />
+ * ```
  *
- * Examples
- * ========
+ * **Note:** You have to ensure proper escaping (`htmlspecialchars`/`intval`/etc.) on your own!
  *
- * Render lib object
- * -----------------
- *
- * ::
- *
- *    <f:cObject typoscriptObjectPath="lib.someLibObject" />
- *
- * Rendered :typoscript:`lib.someLibObject`.
- *
- * Specify cObject data & current value
- * ------------------------------------
- *
- * ::
- *
- *    <f:cObject typoscriptObjectPath="lib.customHeader" data="{article}" currentValueKey="title" />
- *
- * Rendered :typoscript:`lib.customHeader`. Data and current value will be available in TypoScript.
- *
- * Inline notation
- * ---------------
- *
- * ::
- *
- *    {article -> f:cObject(typoscriptObjectPath: 'lib.customHeader')}
- *
- * Rendered :typoscript:`lib.customHeader`. Data will be available in TypoScript.
- *
- * Accessing the data in TypoScript
- * --------------------------------
- *
- * .. code-block:: typoscript
- *
- *    lib.customHeader = COA
- *    lib.customHeader {
- *        10 = TEXT
- *        10.field = author
- *        20 = TEXT
- *        20.current = 1
- *    }
- *
- * When passing an object with ``{data}``, the properties of the object are accessible with :typoscript:`.field` in
- * TypoScript. If only a single value is passed or the ``currentValueKey`` is specified, :typoscript:`.current = 1`
- * can be used in the TypoScript.
+ * @see https://docs.typo3.org/permalink/t3viewhelper:typo3-fluid-cobject
  */
 final class CObjectViewHelper extends AbstractViewHelper
 {
@@ -128,7 +87,7 @@ final class CObjectViewHelper extends AbstractViewHelper
         }
         $currentValue = null;
         if (is_object($data)) {
-            $data = $data instanceof RecordInterface ? ($data->getRawRecord()?->toArray() ?? $data->toArray()) : ObjectAccess::getGettableProperties($data);
+            $data = $data instanceof RecordInterface ? ($data->getRawRecord()?->toArray(true) ?? $data->toArray()) : ObjectAccess::getGettableProperties($data);
         } elseif (is_string($data) || is_numeric($data)) {
             $currentValue = (string)$data;
             $data = [$data];

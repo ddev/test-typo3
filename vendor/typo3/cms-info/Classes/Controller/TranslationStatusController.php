@@ -28,6 +28,9 @@ use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Database\Query\Restriction\DeletedRestriction;
 use TYPO3\CMS\Core\Database\Query\Restriction\WorkspaceRestriction;
 use TYPO3\CMS\Core\Imaging\IconSize;
+use TYPO3\CMS\Core\Imaging\IconState;
+use TYPO3\CMS\Core\Schema\Capability\LanguageAwareSchemaCapability;
+use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
 use TYPO3\CMS\Core\Site\Entity\SiteInterface;
 use TYPO3\CMS\Core\Site\Entity\SiteLanguage;
 use TYPO3\CMS\Core\Type\Bitmask\PageTranslationVisibility;
@@ -148,12 +151,12 @@ class TranslationStatusController extends InfoModuleController
             $pageTitle = ($showPageId ? '[' . (int)$data['row']['uid'] . '] ' : '') . GeneralUtility::fixed_lgd_cs($data['row']['title'], $titleLen);
             // Page icons / titles etc.
             if ($pageModuleAccess) {
-                $pageModuleLink = (string)$this->uriBuilder->buildUriFromRoute($pageModule, ['id' => $data['row']['uid'], 'SET' => ['language' => 0]]);
+                $pageModuleLink = (string)$this->uriBuilder->buildUriFromRoute($pageModule, ['id' => $data['row']['uid'], 'language' => 0, 'function' => 1]);
                 $pageModuleLink = '<a href="' . htmlspecialchars($pageModuleLink) . '" title="' . $lang->sL('LLL:EXT:info/Resources/Private/Language/locallang_webinfo.xlf:lang_renderl10n_editPage') . '">' . htmlspecialchars($pageTitle) . '</a>';
             } else {
                 $pageModuleLink = htmlspecialchars($pageTitle);
             }
-            $icon = '<span title="' . BackendUtility::getRecordIconAltText($data['row'], 'pages') . '">'
+            $icon = '<span title="' . BackendUtility::getRecordIconAltText($data['row']) . '">'
                 . $this->iconFactory->getIconForRecord('pages', $data['row'], IconSize::SMALL)->setTitle(BackendUtility::getRecordIconAltText($data['row'], 'pages', false))->render()
                 . '</span>';
 
@@ -161,7 +164,7 @@ class TranslationStatusController extends InfoModuleController
                 $icon = BackendUtility::wrapClickMenuOnIcon($icon, 'pages', $data['row']['uid']);
             }
 
-            $tCells[] = '<td class="col-nowrap' . (!empty($data['row']['_CSSCLASS']) ? ' ' . $data['row']['_CSSCLASS'] : '') . '">'
+            $tCells[] = '<td class="col-nowrap">'
                 . '<div class="treeline-container">'
                 . (!empty($data['depthData']) ? $data['depthData'] : '')
                 . ($data['HTML'] ?? '')
@@ -170,7 +173,7 @@ class TranslationStatusController extends InfoModuleController
                 . ((string)$data['row']['nav_title'] !== '' ? ' <span>[Nav: <em>' . htmlspecialchars(GeneralUtility::fixed_lgd_cs($data['row']['nav_title'], $titleLen)) . '</em>]</span>' : '')
                 . '</div>'
                 . '</td>';
-            $previewUriBuilder = PreviewUriBuilder::create((int)$data['row']['uid']);
+            $previewUriBuilder = PreviewUriBuilder::create($data['row']);
             // DEFAULT language:
             $pageTranslationVisibility = new PageTranslationVisibility((int)($data['row']['l18n_cfg'] ?? 0));
             $status = $pageTranslationVisibility->shouldBeHiddenInDefaultLanguage() ? 'danger' : 'success';
@@ -227,15 +230,16 @@ class TranslationStatusController extends InfoModuleController
                         ) . '</div>' : '');
 
                         if ($pageModuleAccess) {
-                            $pageModuleLink = (string)$this->uriBuilder->buildUriFromRoute($pageModule, ['id' => $data['row']['uid'], 'SET' => ['language' => $languageId]]);
+                            $pageModuleLink = (string)$this->uriBuilder->buildUriFromRoute($pageModule, ['id' => $data['row']['uid'], 'language' => $languageId, 'function' => 2]);
                             $pageModuleLink = '<a href="' . htmlspecialchars($pageModuleLink) . '" title="' . $lang->sL('LLL:EXT:info/Resources/Private/Language/locallang_webinfo.xlf:lang_renderl10n_editPageLang') . '">' . $info . '</a>';
                         } else {
                             $pageModuleLink = $info;
                         }
-                        $icon = $this->iconFactory->getIconForRecord('pages', $row, IconSize::SMALL);
-                        $iconMarkup = '<span title="' . BackendUtility::getRecordIconAltText($row, 'pages') . '">' . $icon->render() . '</span>';
+                        $icon = '<span title="' . BackendUtility::getRecordIconAltText($row) . '">'
+                            . $this->iconFactory->getIconForRecord('pages', $row, IconSize::SMALL)->setTitle(BackendUtility::getRecordIconAltText($row, 'pages', false))->render()
+                            . '</span>';
                         $tCells[] = '<td class="' . $status . ' col-border-left col-nowrap">' .
-                            BackendUtility::wrapClickMenuOnIcon($iconMarkup, 'pages', (int)$row['uid']) .
+                            BackendUtility::wrapClickMenuOnIcon($icon, 'pages', (int)$row['uid']) .
                             $pageModuleLink .
                             '</td>';
                         // Edit whole record:
@@ -343,7 +347,7 @@ class TranslationStatusController extends InfoModuleController
                 ]);
                 $newButton = '<a href="' . htmlspecialchars($createLink) . '" data-edit-url="' . htmlspecialchars($createLink) . '" class="btn btn-default btn-sm disabled t3js-language-new" data-lang="' . $languageId . '" title="' . $lang->sL(
                     'LLL:EXT:info/Resources/Private/Language/locallang_webinfo.xlf:lang_getlangsta_createNewTranslationHeaders'
-                ) . '">' . $this->iconFactory->getIcon('actions-document-new', IconSize::SMALL)->render() . '</a>';
+                ) . '">' . $this->iconFactory->getIcon('actions-document-new', IconSize::SMALL, null, IconState::STATE_DISABLED)->render() . '</a>';
 
                 $headerCells[] = '<th>' . $editButton . '</th>';
                 $headerCells[] = '<th>' . $newButton . '</th>';
@@ -375,6 +379,9 @@ class TranslationStatusController extends InfoModuleController
      */
     protected function getLangStatus(int $pageId, int $langId): bool|array
     {
+        $schema = $this->tcaSchemaFactory->get('pages');
+        /** @var LanguageAwareSchemaCapability $languageCapability */
+        $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
         $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
             ->getQueryBuilderForTable('pages');
         $queryBuilder
@@ -387,13 +394,13 @@ class TranslationStatusController extends InfoModuleController
             ->from('pages')
             ->where(
                 $queryBuilder->expr()->eq(
-                    $GLOBALS['TCA']['pages']['ctrl']['transOrigPointerField'],
+                    $languageCapability->getTranslationOriginPointerField()->getName(),
                     $queryBuilder->createNamedParameter($pageId, Connection::PARAM_INT)
                 )
             )
             ->andWhere(
                 $queryBuilder->expr()->eq(
-                    $GLOBALS['TCA']['pages']['ctrl']['languageField'],
+                    $languageCapability->getLanguageField()->getName(),
                     $queryBuilder->createNamedParameter($langId, Connection::PARAM_INT)
                 )
             )

@@ -50,6 +50,7 @@ use TYPO3\CMS\Core\TypoScript\AST\Traverser\AstTraverser;
 use TYPO3\CMS\Core\TypoScript\Tokenizer\LosslessTokenizer;
 use TYPO3\CMS\Install\Database\PermissionsCheck;
 use TYPO3\CMS\Install\Service\LateBootService;
+use TYPO3\CMS\Install\Service\LoadTcaService;
 use TYPO3\CMS\Install\Service\SessionService;
 use TYPO3\CMS\Install\Service\SetupDatabaseService;
 use TYPO3\CMS\Install\Service\SetupService;
@@ -289,7 +290,6 @@ class ServiceProvider extends AbstractServiceProvider
     public static function getIconController(ContainerInterface $container): Controller\IconController
     {
         return new Controller\IconController(
-            $container->get(IconRegistry::class),
             $container->get(IconFactory::class)
         );
     }
@@ -305,6 +305,7 @@ class ServiceProvider extends AbstractServiceProvider
             $container->get(SetupService::class),
             $container->get(SetupDatabaseService::class),
             $container->get(HashService::class),
+            $container->get(IconRegistry::class),
         );
     }
 
@@ -316,6 +317,7 @@ class ServiceProvider extends AbstractServiceProvider
             $container->get(Service\SilentTemplateFileUpgradeService::class),
             $container->get(BackendEntryPointResolver::class),
             $container->get(HashService::class),
+            $container->get(IconRegistry::class),
         );
     }
 
@@ -368,7 +370,8 @@ class ServiceProvider extends AbstractServiceProvider
             $container->get(PackageManager::class),
             $container->get(Service\LateBootService::class),
             $container->get(Service\DatabaseUpgradeWizardsService::class),
-            $container->get(FormProtectionFactory::class)
+            $container->get(FormProtectionFactory::class),
+            $container->get(LoadTcaService::class)
         );
     }
 

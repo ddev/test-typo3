@@ -1109,7 +1109,6 @@ class GeneralUtility
         if (xml_get_error_code($parser)) {
             return 'Line ' . xml_get_current_line_number($parser) . ': ' . xml_error_string(xml_get_error_code($parser));
         }
-        xml_parser_free($parser);
         $stack = [[]];
         $stacktop = 0;
         $startPoint = 0;
@@ -1333,7 +1332,6 @@ class GeneralUtility
         if (xml_get_error_code($parser)) {
             return 'Line ' . xml_get_current_line_number($parser) . ': ' . xml_error_string(xml_get_error_code($parser));
         }
-        xml_parser_free($parser);
         // Init vars:
         $stack = [[]];
         $stacktop = 0;
@@ -1639,7 +1637,7 @@ class GeneralUtility
             // Checking dir-name again (sub-dir might have been created)
             if (@is_dir($dirName)) {
                 if ($filepath === $dirName . $fI['basename']) {
-                    static::writeFile($filepath, $content);
+                    static::writeFile($filepath, $content, true);
                     if (!@is_file($filepath)) {
                         $errorMessage = 'The file was not written to the disk. Please, check that you have write permissions to the ' . $prefixLabel . ' directory.';
                     }
@@ -2037,6 +2035,18 @@ class GeneralUtility
      * = TRUE : modify filename
      * = FALSE : add timestamp as query parameter
      *
+     * Benni Note:
+     *
+     * Always call it like this:
+     * 1. make a file reference (EXT...) completely absolute
+     * $file = GeneralUtility::getFileAbsFileName($file);
+     *
+     * 2. attach ?timestamp to filename or re-write
+     * $file = GeneralUtility::createVersionNumberedFilename($file);
+     *
+     * 3. make it ready for attaching in your HTML/JSON etc. by making it an "absolute" URI path
+     * $file = PathUtility::getAbsoluteWebPath($file);
+     *
      * @param string $file Relative path to file including all potential query parameters (not htmlspecialchared yet)
      * @return string Relative path with version filename including the timestamp
      */
@@ -2049,12 +2059,22 @@ class GeneralUtility
 
         // @todo: in v13 this should be resolved by using Environment::getPublicPath() only
         if ($isFrontend) {
-            // Frontend should still allow /static/myfile.css - see #98106
-            // This should happen regardless of the incoming path is absolute or not
-            $path = self::resolveBackPath(self::dirname(Environment::getCurrentScript()) . '/' . $path);
+            // Since frontend should still allow absolute web paths (= absolute to TYPO3's web dir),
+            // there is no way to differentiate between those paths and "real" absolute paths (= from
+            // the file system) without checking for the file's existence
+            // see #98106
+            if (PathUtility::isAbsolutePath($path) && self::isAllowedAbsPath($path) && file_exists($path)) {
+                $path = self::resolveBackPath($path);
+            } else {
+                // Prepend absolute web paths with TYPO3's web dir (= the dir in which index.php is located)
+                $path = self::resolveBackPath(self::dirname(Environment::getCurrentScript()) . '/' . ltrim($path, '/'));
+            }
         } elseif (!PathUtility::isAbsolutePath($path)) {
             // Backend and non-absolute path
             $path = self::resolveBackPath(self::dirname(Environment::getCurrentScript()) . '/' . $path);
+        } elseif (is_file(Environment::getPublicPath() . '/' . ltrim($path, '/'))) {
+            // Use-case: $path = /typo3/sysext/backend/Resources/Public/file.css when the order was not built properly
+            $path = Environment::getPublicPath() . '/' . ltrim($path, '/');
         }
 
         if ($isFrontend) {
@@ -2367,12 +2387,23 @@ class GeneralUtility
                 $retVal = substr(self::getIndpEnv('TYPO3_REQUEST_URL'), strlen(self::getIndpEnv('TYPO3_SITE_URL')));
                 break;
             case 'TYPO3_SSL':
-                $proxySSL = trim($GLOBALS['TYPO3_CONF_VARS']['SYS']['reverseProxySSL'] ?? '');
-                if ($proxySSL === '*') {
-                    $proxySSL = $GLOBALS['TYPO3_CONF_VARS']['SYS']['reverseProxyIP'];
+                // How does TYPO3 determine if the connection was established via TLS/SSL/https?
+                // 1. If reverseProxySSL matches, then we now that Client -> Proxy is SSL,
+                //    and Proxy -> App Server is non-SSL. SSL Termination happens at Proxy at ALL times.
+                // 2. If reverseProxyIP matches, and HTTP_X_FORWARDED_PROTO is set, it is evaluated
+                // 3. If no other matches, see webserverUsesHttps()
+                // Note: HTTP_X_FORWARDED_PROTO is ONLY evaluated at the point, where we know
+                //       that the incoming REMOTE_ADDR is a trusted proxy!
+                $configuredProxySSL = trim($GLOBALS['TYPO3_CONF_VARS']['SYS']['reverseProxySSL'] ?? '');
+                $configuredProxyRegular = trim($GLOBALS['TYPO3_CONF_VARS']['SYS']['reverseProxyIP'] ?? '');
+                if ($configuredProxySSL === '*') {
+                    $configuredProxySSL = $configuredProxyRegular;
                 }
-                if (self::cmpIP($_SERVER['REMOTE_ADDR'] ?? '', $proxySSL)) {
+                if (self::cmpIP($_SERVER['REMOTE_ADDR'] ?? '', $configuredProxySSL)) {
+                    // If the reverseProxySSL matches, we know that the connection from client to proxy is secure.
                     $retVal = true;
+                } elseif (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && self::cmpIP($_SERVER['REMOTE_ADDR'] ?? '', $configuredProxyRegular)) {
+                    $retVal = strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https';
                 } else {
                     $retVal = self::webserverUsesHttps();
                 }
@@ -2472,8 +2503,7 @@ class GeneralUtility
 
         // Absolute path, but set to blank if not inside allowed directories.
         if (PathUtility::isAbsolutePath($fileName)) {
-            if (str_starts_with($fileName, Environment::getProjectPath()) ||
-                str_starts_with($fileName, Environment::getPublicPath())) {
+            if (static::isAllowedAbsPath($fileName)) {
                 return $checkForBackPath($fileName);
             }
             return '';
@@ -2553,7 +2583,7 @@ class GeneralUtility
 
     /**
      * Checks if a given string is a valid frame URL to be loaded in the
-     * backend.
+     * backend or used in redirect headers.
      *
      * If the given url is empty or considered to be harmless, it is returned
      * as is, else the event is logged and an empty string is returned.
@@ -2565,7 +2595,17 @@ class GeneralUtility
     {
         $sanitizedUrl = '';
         if (!empty($url)) {
+            if (strpbrk($url, "\n\r\x00") !== false) {
+                static::getLogger()->notice('URL "{url}" contains unexpected whitespace and was denied as local url.', ['url' => $url]);
+                return '';
+            }
+
             $decodedUrl = rawurldecode($url);
+            if ($decodedUrl !== ltrim($decodedUrl, " \t\v")) {
+                static::getLogger()->notice('URL "{url}" contains unexpected whitespace and was denied as local url.', ['url' => $url]);
+                return '';
+            }
+
             $parsedUrl = parse_url($decodedUrl);
             $testAbsoluteUrl = self::resolveBackPath($decodedUrl);
             $testRelativeUrl = self::resolveBackPath(self::dirname(self::getIndpEnv('SCRIPT_NAME')) . '/' . $decodedUrl);
@@ -2728,7 +2768,7 @@ class GeneralUtility
     public static function callUserFunction(string|\Closure $funcName, mixed &$params, ?object $ref = null): mixed
     {
         // Check if we're using a closure and invoke it directly.
-        if (is_object($funcName) && is_a($funcName, \Closure::class)) {
+        if (is_a($funcName, \Closure::class)) {
             return call_user_func_array($funcName, [&$params, &$ref]);
         }
         $funcName = trim($funcName);

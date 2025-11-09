@@ -1,8 +1,10 @@
 .. include:: /Includes.rst.txt
 
-======================
-Fluid Rendering Engine
-======================
+..  _start:
+
+===============
+Fluid Explained
+===============
 
 :Package name:
     typo3fluid/fluid
@@ -14,8 +16,7 @@ Fluid Rendering Engine
     en
 
 :Author:
-    Claus Due, Sebastian Kurfürst, Karsten Dambekalns, Robert Lemke & Fluid
-    contributors
+    Fluid contributors
 
 :License:
     This document is published under the
@@ -32,21 +33,41 @@ output in the TYPO3 CMS. However, it is not dependent on TYPO3 and can be used
 in any PHP project.
 
 If using Fluid in combination with TYPO3 CMS, a look at the documentation of
-:doc:`ext_fsc:Index` can be worth a look.
+`Fluid Styled Content
+ <https://docs.typo3.org/permalink/typo3/cms-fluid-styled-content:start>`_
+can be worth a look.
 
 ----
 
 **Table of Contents:**
 
-.. toctree::
-   :maxdepth: 2
-   :titlesonly:
+..  toctree::
+    :caption: About Fluid
+    :maxdepth: 1
+    :titlesonly:
 
-   Installation/Index
-   Usage/Index
-   Development/Index
-   ViewHelpers/Index
-   Changelog/Index
+    Introduction/Index
+    Installation/Index
+    Usage/Index
+    Syntax/Index
+
+..  toctree::
+    :caption: ViewHelper Reference
+    :maxdepth: 1
+    :titlesonly:
+
+    ViewHelpers/Fluid/Index
+    ViewHelpers/SchemaFiles
+
+..  toctree::
+    :caption: Appendix
+    :maxdepth: 1
+    :titlesonly:
+
+    Extending/Index
+    Integrating/Index
+    Internals/Index
+    Changelog/Index
 
 .. Meta Menu
 

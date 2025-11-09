@@ -41,7 +41,7 @@ final class DateRangeValidator extends AbstractValidator
      */
     public function isValid(mixed $value): void
     {
-        $this->validateOptions();
+        $options = $this->validateOptions();
 
         if (!($value instanceof \DateTime)) {
             $this->addError(
@@ -55,19 +55,19 @@ final class DateRangeValidator extends AbstractValidator
             return;
         }
 
-        $minimum = $this->options['minimum'];
-        $maximum = $this->options['maximum'];
-        $format = $this->options['format'];
+        $minimum = $options['minimum'];
+        $maximum = $options['maximum'];
+        $format = $options['format'];
         $value->modify('midnight');
 
         if ($minimum instanceof \DateTime && $value < $minimum) {
             $this->addError(
                 $this->translateErrorMessage(
-                    'validation.error.1521293686',
+                    'validation.error.1521293687',
                     'form',
                     [$minimum->format($format)]
                 ),
-                1521293686,
+                1521293687,
                 [$minimum->format($format)]
             );
         }
@@ -75,11 +75,11 @@ final class DateRangeValidator extends AbstractValidator
         if ($maximum instanceof \DateTime && $value > $maximum) {
             $this->addError(
                 $this->translateErrorMessage(
-                    'validation.error.1521293687',
+                    'validation.error.1521293686',
                     'form',
                     [$maximum->format($format)]
                 ),
-                1521293687,
+                1521293686,
                 [$maximum->format($format)]
             );
         }
@@ -90,8 +90,9 @@ final class DateRangeValidator extends AbstractValidator
      *
      * @throws InvalidValidationOptionsException if the configured validation options are incorrect
      */
-    protected function validateOptions(): void
+    protected function validateOptions(): array
     {
+        $options = $this->options;
         if (!empty($this->options['minimum'])) {
             $minimum = \DateTime::createFromFormat($this->options['format'], $this->options['minimum']);
             if (!($minimum instanceof \DateTime)) {
@@ -99,7 +100,7 @@ final class DateRangeValidator extends AbstractValidator
                 throw new InvalidValidationOptionsException($message, 1521293813);
             }
             $minimum->modify('midnight');
-            $this->options['minimum'] = $minimum;
+            $options['minimum'] = $minimum;
         }
 
         if (!empty($this->options['maximum'])) {
@@ -109,7 +110,8 @@ final class DateRangeValidator extends AbstractValidator
                 throw new InvalidValidationOptionsException($message, 1521293814);
             }
             $maximum->modify('midnight');
-            $this->options['maximum'] = $maximum;
+            $options['maximum'] = $maximum;
         }
+        return $options;
     }
 }

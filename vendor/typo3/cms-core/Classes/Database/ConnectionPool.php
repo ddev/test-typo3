@@ -20,6 +20,8 @@ namespace TYPO3\CMS\Core\Database;
 use Doctrine\DBAL\Configuration;
 use Doctrine\DBAL\Driver\Middleware as DriverMiddleware;
 use Doctrine\DBAL\DriverManager;
+use Doctrine\DBAL\Exception\MalformedDsnException;
+use Doctrine\DBAL\Tools\DsnParser;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
 use TYPO3\CMS\Core\Database\Middleware\UsableForConnectionInterface;
@@ -55,6 +57,9 @@ class ConnectionPool
 
     /**
      * @var array<non-empty-string,class-string>
+     * @todo Needs to be refactored. Only MySQL and MariaDB support this type, using this to register the type AND
+     *       add mappings to all connections, even unsupported connections for SQLite or PostgreSQL is not correct,
+     *       and needs to be respected. Or the type needs to provide working fallbacks for unsupported platforms.
      */
     protected array $customDoctrineTypes = [
         SetType::TYPE => SetType::class,
@@ -62,6 +67,7 @@ class ConnectionPool
 
     /**
      * @var array<non-empty-string,class-string>
+     * @todo Needs to be refactored to differentiate between type registration and platform specific type mapping.
      */
     protected array $overrideDoctrineTypes = [
         Types::DATE_MUTABLE => DateType::class,
@@ -133,6 +139,16 @@ class ConnectionPool
                 'The requested database connection named "' . $connectionName . '" has not been configured.',
                 1459422492
             );
+        }
+        if (!empty($connectionParams['url'])) {
+            $dsnUrl = $connectionParams['url'];
+            unset($connectionParams['url']);
+            try {
+                $parsedParams = (new DsnParser())->parse($dsnUrl);
+            } catch (MalformedDsnException $e) {
+                throw new \UnexpectedValueException('Malformed connection parameter "url".', 1750964898, $e);
+            }
+            $connectionParams = [...$connectionParams, ...$parsedParams];
         }
         if (empty($connectionParams['wrapperClass'])) {
             $connectionParams['wrapperClass'] = Connection::class;

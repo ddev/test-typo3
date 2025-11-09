@@ -18,12 +18,15 @@ declare(strict_types=1);
 namespace TYPO3\CMS\Extbase\Persistence\Generic;
 
 use Psr\EventDispatcher\EventDispatcherInterface;
+use TYPO3\CMS\Core\Configuration\Features;
 use TYPO3\CMS\Core\Context\LanguageAspect;
 use TYPO3\CMS\Core\Database\Query\QueryHelper;
 use TYPO3\CMS\Core\Database\ReferenceIndex;
+use TYPO3\CMS\Core\DataHandling\TableColumnType;
 use TYPO3\CMS\Core\SingletonInterface;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Extbase\Configuration\ConfigurationManagerInterface;
+use TYPO3\CMS\Extbase\Configuration\Exception\NoServerRequestGivenException;
 use TYPO3\CMS\Extbase\DomainObject\AbstractDomainObject;
 use TYPO3\CMS\Extbase\DomainObject\AbstractValueObject;
 use TYPO3\CMS\Extbase\DomainObject\DomainObjectInterface;
@@ -70,7 +73,8 @@ class Backend implements BackendInterface, SingletonInterface
         protected readonly ReflectionService $reflectionService,
         protected \TYPO3\CMS\Extbase\Persistence\Generic\Storage\BackendInterface $storageBackend,
         protected DataMapFactory $dataMapFactory,
-        protected readonly EventDispatcherInterface $eventDispatcher
+        protected readonly EventDispatcherInterface $eventDispatcher,
+        protected readonly Features $features,
     ) {
         $this->referenceIndex = GeneralUtility::makeInstance(ReferenceIndex::class);
         $this->aggregateRootObjects = new ObjectStorage();
@@ -148,7 +152,8 @@ class Backend implements BackendInterface, SingletonInterface
         $languageAspect = new LanguageAspect(
             $languageAspect->getId(),
             $languageAspect->getContentId(),
-            $languageAspect->getOverlayType() === LanguageAspect::OVERLAYS_OFF ? LanguageAspect::OVERLAYS_ON_WITH_FLOATING : $languageAspect->getOverlayType()
+            $languageAspect->getOverlayType() === LanguageAspect::OVERLAYS_OFF ? LanguageAspect::OVERLAYS_ON_WITH_FLOATING : $languageAspect->getOverlayType(),
+            $languageAspect->getFallbackChain()
         );
         $query->getQuerySettings()->setLanguageAspect($languageAspect);
         return $query->matching($query->equals('uid', $identifier))->execute()->getFirst();
@@ -577,10 +582,18 @@ class Backend implements BackendInterface, SingletonInterface
         if ($uid >= 1) {
             $this->eventDispatcher->dispatch(new EntityAddedToPersistenceEvent($object));
         }
-        $frameworkConfiguration = $this->configurationManager->getConfiguration(ConfigurationManagerInterface::CONFIGURATION_TYPE_FRAMEWORK);
-        if (($frameworkConfiguration['persistence']['updateReferenceIndex'] ?? '') === '1') {
+
+        $updateRefIndex = true;
+        try {
+            $frameworkConfiguration = $this->configurationManager->getConfiguration(ConfigurationManagerInterface::CONFIGURATION_TYPE_FRAMEWORK);
+            $updateRefIndex = ($frameworkConfiguration['persistence']['updateReferenceIndex'] ?? '') === '1';
+        } catch (NoServerRequestGivenException) {
+            // fallback: yes, update the reference index if configuration manager has not been initialized
+        }
+        if ($updateRefIndex) {
             $this->referenceIndex->updateRefIndexTable($dataMap->getTableName(), $uid);
         }
+
         $this->session->registerObject($object, $identifier);
         if ($uid >= 1) {
             $this->eventDispatcher->dispatch(new EntityFinalizedAfterPersistenceEvent($object));
@@ -710,7 +723,7 @@ class Backend implements BackendInterface, SingletonInterface
     /**
      * Updates a given object in the storage
      */
-    protected function updateObject(DomainObjectInterface $object, array $row): bool
+    protected function updateObject(DomainObjectInterface $object, array $row): void
     {
         $dataMap = $this->dataMapFactory->buildDataMap(get_class($object));
         $this->addCommonFieldsToRow($object, $row);
@@ -724,11 +737,16 @@ class Backend implements BackendInterface, SingletonInterface
         $this->storageBackend->updateRow($dataMap->getTableName(), $row);
         $this->eventDispatcher->dispatch(new EntityUpdatedInPersistenceEvent($object));
 
-        $frameworkConfiguration = $this->configurationManager->getConfiguration(ConfigurationManagerInterface::CONFIGURATION_TYPE_FRAMEWORK);
-        if (($frameworkConfiguration['persistence']['updateReferenceIndex'] ?? '') === '1') {
+        $updateRefIndex = true;
+        try {
+            $frameworkConfiguration = $this->configurationManager->getConfiguration(ConfigurationManagerInterface::CONFIGURATION_TYPE_FRAMEWORK);
+            $updateRefIndex = ($frameworkConfiguration['persistence']['updateReferenceIndex'] ?? '') === '1';
+        } catch (NoServerRequestGivenException) {
+            // fallback: yes, update the reference index if configuration manager has not been initialized
+        }
+        if ($updateRefIndex) {
             $this->referenceIndex->updateRefIndexTable($dataMap->getTableName(), (int)$row['uid']);
         }
-        return true;
     }
 
     /**
@@ -796,8 +814,15 @@ class Backend implements BackendInterface, SingletonInterface
         $this->eventDispatcher->dispatch(new EntityRemovedFromPersistenceEvent($object));
 
         $this->removeRelatedObjects($object);
-        $frameworkConfiguration = $this->configurationManager->getConfiguration(ConfigurationManagerInterface::CONFIGURATION_TYPE_FRAMEWORK);
-        if (($frameworkConfiguration['persistence']['updateReferenceIndex'] ?? '') === '1') {
+
+        $updateRefIndex = true;
+        try {
+            $frameworkConfiguration = $this->configurationManager->getConfiguration(ConfigurationManagerInterface::CONFIGURATION_TYPE_FRAMEWORK);
+            $updateRefIndex = ($frameworkConfiguration['persistence']['updateReferenceIndex'] ?? '') === '1';
+        } catch (NoServerRequestGivenException) {
+            // fallback: yes, update the reference index if configuration manager has not been initialized
+        }
+        if ($updateRefIndex) {
             $this->referenceIndex->updateRefIndexTable($tableName, $object->getUid());
         }
     }
@@ -845,7 +870,17 @@ class Backend implements BackendInterface, SingletonInterface
      */
     protected function determineStoragePageIdForNewRecord(?DomainObjectInterface $object = null): int
     {
-        $frameworkConfiguration = $this->configurationManager->getConfiguration(ConfigurationManagerInterface::CONFIGURATION_TYPE_FRAMEWORK);
+        $frameworkConfiguration = [];
+        try {
+            $frameworkConfiguration = $this->configurationManager->getConfiguration(ConfigurationManagerInterface::CONFIGURATION_TYPE_FRAMEWORK);
+        } catch (NoServerRequestGivenException) {
+            // Fallback to empty array if ConfigurationManager has not been initialized with a Request.
+            // This implies storagePid 0. This is a measure to specifically allow running the extbase
+            // persistence layer without a Request, which may be useful in some CLI scenarios (and can
+            // be convenient in tests) when no other code branches of extbase that have a hard dependency
+            // to the Request (e.g. controllers / view) are used.
+        }
+
         if ($object !== null) {
             if (ObjectAccess::isPropertyGettable($object, AbstractDomainObject::PROPERTY_PID)) {
                 $pid = ObjectAccess::getProperty($object, AbstractDomainObject::PROPERTY_PID);
@@ -858,7 +893,7 @@ class Backend implements BackendInterface, SingletonInterface
                 return (int)$frameworkConfiguration['persistence']['classes'][$className]['newRecordStoragePid'];
             }
         }
-        $storagePidList = GeneralUtility::intExplode(',', (string)($frameworkConfiguration['persistence']['storagePid'] ?? ''));
+        $storagePidList = GeneralUtility::intExplode(',', (string)($frameworkConfiguration['persistence']['storagePid'] ?? '0'));
         return $storagePidList[0];
     }
 
@@ -878,19 +913,39 @@ class Backend implements BackendInterface, SingletonInterface
             return GeneralUtility::makeInstance(DataMapper::class)->getPlainValue($input, $columnMap);
         }
 
-        if (!$property) {
+        if ($this->features->isFeatureEnabled('extbase.consistentDateTimeHandling') &&
+            $columnMap?->getType() === TableColumnType::DATETIME
+        ) {
+            return QueryHelper::transformDateTimeToDatabaseValue(
+                null,
+                $columnMap->isNullable(),
+                $columnMap->getDateTimeFormat() ?? 'datetime',
+                $columnMap->getDateTimeStorageFormat()
+            );
+        }
+
+        if ($property === null) {
             return null;
         }
 
-        $className = $property->getPrimaryType()->getClassName();
+        $className = $property->getPrimaryType()->getClassName() ?? null;
+
+        if ($className === null) {
+            return null;
+        }
 
         // Nullable domain model property
         if (is_subclass_of($className, DomainObjectInterface::class)) {
             return 0;
         }
 
-        // Nullable DateTime property
+        // Nullable DateTime property (superseded by extbase.consistentDateTimeHandling above)
+        // @todo remove in TYPO3 v15 when extbase.consistentDateTimeHandling will be enforced
         if ($columnMap && is_subclass_of($className, \DateTimeInterface::class)) {
+            if ($columnMap->isNullable() && $property->isNullable()) {
+                return null;
+            }
+
             $datetimeFormats = QueryHelper::getDateTimeFormats();
             $dateFormat = $columnMap->getDateTimeStorageFormat();
             if (!$dateFormat) {

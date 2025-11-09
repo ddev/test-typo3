@@ -24,6 +24,8 @@ use TYPO3\CMS\Backend\Attribute\AsController;
 use TYPO3\CMS\Backend\Dto\Settings\EditableSetting;
 use TYPO3\CMS\Backend\Routing\UriBuilder;
 use TYPO3\CMS\Backend\Template\Components\ButtonBar;
+use TYPO3\CMS\Backend\Template\Components\Buttons\DropDown\DropDownItemInterface;
+use TYPO3\CMS\Backend\Template\Components\Buttons\DropDown\DropDownToggle;
 use TYPO3\CMS\Backend\Template\ModuleTemplate;
 use TYPO3\CMS\Backend\Template\ModuleTemplateFactory;
 use TYPO3\CMS\Backend\Utility\BackendUtility;
@@ -40,6 +42,7 @@ use TYPO3\CMS\Core\Messaging\FlashMessageService;
 use TYPO3\CMS\Core\Page\PageRenderer;
 use TYPO3\CMS\Core\Settings\Category;
 use TYPO3\CMS\Core\Settings\SettingDefinition;
+use TYPO3\CMS\Core\Settings\SettingsMode;
 use TYPO3\CMS\Core\Settings\SettingsTypeRegistry;
 use TYPO3\CMS\Core\Site\Entity\Site;
 use TYPO3\CMS\Core\Site\Set\CategoryRegistry;
@@ -49,7 +52,6 @@ use TYPO3\CMS\Core\SysLog\Action\Setting as SettingAction;
 use TYPO3\CMS\Core\SysLog\Error as SystemLogErrorClassification;
 use TYPO3\CMS\Core\SysLog\Type;
 use TYPO3\CMS\Core\Type\ContextualFeedbackSeverity;
-use TYPO3\CMS\Core\Utility\ArrayUtility;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 
 /**
@@ -95,6 +97,15 @@ readonly class SiteSettingsController
 
     public function editAction(ServerRequestInterface $request): ResponseInterface
     {
+        $moduleData = $request->getAttribute('moduleData');
+        $targetMode = $request->getQueryParams()['mode'] ?? null;
+        if ($targetMode) {
+            $newSettingsMode = SettingsMode::tryFrom($targetMode) ?? SettingsMode::BASIC->value;
+            $moduleData->set('mode', $newSettingsMode->value);
+            $this->getBackendUser()->pushModuleData($moduleData->getModuleIdentifier(), $moduleData->toArray());
+        }
+        $mode = SettingsMode::tryFrom($moduleData->get('mode') ?? '') ?? SettingsMode::BASIC;
+
         $identifier = $request->getQueryParams()['site'] ?? null;
         if ($identifier === null) {
             throw new \RuntimeException('Site identifier to edit must be set', 1713394528);
@@ -135,9 +146,11 @@ readonly class SiteSettingsController
         );
         $hasSettings = count($categories) > 0;
 
+        $this->addDocHeaderBreadcrumb($view, $site);
         $this->addDocHeaderCloseAndSaveButtons($view, $site, $returnUrl ?? $overviewUrl, $hasSettings);
+        $this->addDocHeaderViewModeButton($view, $site, $mode);
         if ($hasSettings) {
-            $this->addDocHeaderExportButton($view, $site);
+            $this->addDocHeaderExportButton($view, $site, $mode);
         }
 
         $this->addDocHeaderSiteConfigurationButton($view, $site);
@@ -155,7 +168,7 @@ readonly class SiteSettingsController
         $view->assign('returnUrl', $returnUrl);
         $view->assign('dumpUrl', (string)$this->uriBuilder->buildUriFromRoute('site_settings.dump', ['site' => $site->getIdentifier()]));
         $view->assign('categories', $categories);
-        $view->assign('debug', $this->getBackendUser()->shallDisplayDebugInformation());
+        $view->assign('mode', $mode);
 
         $formProtection = $this->formProtectionFactory->createFromRequest($request);
         $view->assign('formToken', $formProtection->generateToken('site_settings', 'save'));
@@ -205,17 +218,18 @@ readonly class SiteSettingsController
             return new RedirectResponse($returnUrl ?? $overviewUrl);
         }
 
-        $changes = $this->siteSettingsService->computeSettingsDiff($site, $parsedBody['settings'] ?? []);
-        $this->siteSettingsService->writeSettings($site, $changes['settings']);
+        $newSettings = $this->siteSettingsService->createSettingsFromFormData($site, $parsedBody['settings'] ?? []);
+        $settingsDiff = $this->siteSettingsService->computeSettingsDiff($site, $newSettings);
+        $this->siteSettingsService->writeSettings($site, $settingsDiff->asArray());
 
-        if ($changes['changes'] !== [] || $changes['deletions'] !== []) {
+        if ($settingsDiff->changes !== [] || $settingsDiff->deletions !== []) {
             $this->getBackendUser()->writelog(
                 Type::SITE,
                 SettingAction::CHANGE,
                 SystemLogErrorClassification::MESSAGE,
-                0,
+                null,
                 'Site settings changed for \'%s\': %s',
-                [$site->getIdentifier(), json_encode($changes)],
+                [$site->getIdentifier(), json_encode($settingsDiff)],
                 'site'
             );
 
@@ -249,11 +263,14 @@ readonly class SiteSettingsController
         $specificSetting = (string)($parsedBody['specificSetting'] ?? '');
 
         $minify = $specificSetting !== '' ? false : true;
-        $changes = $this->siteSettingsService->computeSettingsDiff($site, $parsedBody['settings'] ?? [], $minify);
-        $settings = $changes['settings'];
-        if ($specificSetting !== '') {
-            $value = ArrayUtility::getValueByPath($settings, $specificSetting, '.');
-            $settings = ArrayUtility::setValueByPath([], $specificSetting, $value, '.');
+
+        $newSettings = $this->siteSettingsService->createSettingsFromFormData($site, $parsedBody['settings'] ?? []);
+        $settingsDiff = $this->siteSettingsService->computeSettingsDiff($site, $newSettings, $minify);
+        $settings = $settingsDiff->asArray();
+        if ($specificSetting !== '' && isset($settings[$specificSetting])) {
+            $settings = [
+                $specificSetting => $settings[$specificSetting],
+            ];
         }
 
         $yamlContents = Yaml::dump($settings, 99, 2, Yaml::DUMP_EMPTY_ARRAY_AS_SEQUENCE | Yaml::DUMP_OBJECT_AS_MAP);
@@ -261,6 +278,12 @@ readonly class SiteSettingsController
         return new JsonResponse([
             'yaml' => $yamlContents,
         ]);
+    }
+
+    protected function addDocHeaderBreadcrumb(ModuleTemplate $moduleTemplate, Site $site): void
+    {
+        $record = BackendUtility::getRecord('pages', $site->getRootPageId());
+        $moduleTemplate->getDocHeaderComponent()->setMetaInformation($record ?? []);
     }
 
     protected function addDocHeaderCloseAndSaveButtons(ModuleTemplate $moduleTemplate, Site $site, string $closeUrl, bool $saveEnabled): void
@@ -284,18 +307,64 @@ readonly class SiteSettingsController
         $buttonBar->addButton($saveButton, ButtonBar::BUTTON_POSITION_LEFT, 4);
     }
 
-    protected function addDocHeaderExportButton(ModuleTemplate $moduleTemplate, Site $site): void
+    protected function addDocHeaderViewModeButton(ModuleTemplate $moduleTemplate, Site $site, SettingsMode $mode): void
     {
         $languageService = $this->getLanguageService();
         $buttonBar = $moduleTemplate->getDocHeaderComponent()->getButtonBar();
-        $exportButton = $buttonBar->makeInputButton()
-            ->setTitle($languageService->sL('LLL:EXT:backend/Resources/Private/Language/locallang_sitesettings.xlf:edit.yamlExport'))
-            ->setIcon($this->iconFactory->getIcon('actions-database-export', IconSize::SMALL))
-            ->setShowLabelText(true)
-            ->setName('CMD')
-            ->setValue('export')
-            ->setForm('sitesettings_form');
-        $buttonBar->addButton($exportButton, ButtonBar::BUTTON_POSITION_RIGHT, 2);
+
+        $viewModeItems[] = GeneralUtility::makeInstance(DropDownToggle::class)
+            ->setActive(($mode === SettingsMode::BASIC))
+            ->setHref(
+                (string)$this->uriBuilder->buildUriFromRoute(
+                    'site_settings.edit',
+                    array_filter([
+                        'site' => $site->getIdentifier(),
+                        'mode' => SettingsMode::BASIC->value,
+                    ])
+                )
+            )
+            ->setLabel($languageService->sL('LLL:EXT:backend/Resources/Private/Language/locallang_settingseditor.xlf:settingseditor.mode.basic'))
+            ->setIcon($this->iconFactory->getIcon('actions-window', IconSize::SMALL));
+
+        $viewModeItems[] = GeneralUtility::makeInstance(DropDownToggle::class)
+            ->setActive(($mode === SettingsMode::ADVANCED))
+            ->setHref(
+                (string)$this->uriBuilder->buildUriFromRoute(
+                    'site_settings.edit',
+                    array_filter([
+                        'site' => $site->getIdentifier(),
+                        'mode' => SettingsMode::ADVANCED->value,
+                    ])
+                )
+            )
+            ->setLabel($languageService->sL('LLL:EXT:backend/Resources/Private/Language/locallang_settingseditor.xlf:settingseditor.mode.advanced'))
+            ->setIcon($this->iconFactory->getIcon('actions-window-cog', IconSize::SMALL));
+
+        $viewModeButton = $buttonBar->makeDropDownButton()
+            ->setLabel($languageService->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.view'))
+            ->setShowLabelText(true);
+        foreach ($viewModeItems as $viewModeItem) {
+            /** @var DropDownItemInterface $viewModeItem */
+            $viewModeButton->addItem($viewModeItem);
+        }
+
+        $buttonBar->addButton($viewModeButton, ButtonBar::BUTTON_POSITION_RIGHT, 2);
+    }
+
+    protected function addDocHeaderExportButton(ModuleTemplate $moduleTemplate, Site $site, SettingsMode $mode): void
+    {
+        if ($mode === SettingsMode::ADVANCED) {
+            $languageService = $this->getLanguageService();
+            $buttonBar = $moduleTemplate->getDocHeaderComponent()->getButtonBar();
+            $exportButton = $buttonBar->makeInputButton()
+                ->setTitle($languageService->sL('LLL:EXT:backend/Resources/Private/Language/locallang_sitesettings.xlf:edit.yamlExport'))
+                ->setIcon($this->iconFactory->getIcon('actions-database-export', IconSize::SMALL))
+                ->setShowLabelText(true)
+                ->setName('CMD')
+                ->setValue('export')
+                ->setForm('sitesettings_form');
+            $buttonBar->addButton($exportButton, ButtonBar::BUTTON_POSITION_RIGHT, 1);
+        }
     }
 
     protected function addDocHeaderSiteConfigurationButton(ModuleTemplate $moduleTemplate, Site $site): void

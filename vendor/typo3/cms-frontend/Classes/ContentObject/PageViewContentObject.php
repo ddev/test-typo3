@@ -17,12 +17,14 @@ declare(strict_types=1);
 
 namespace TYPO3\CMS\Frontend\ContentObject;
 
+use TYPO3\CMS\Core\Information\Typo3Information;
 use TYPO3\CMS\Core\Page\PageLayoutResolver;
 use TYPO3\CMS\Core\TypoScript\TypoScriptService;
 use TYPO3\CMS\Core\Utility\PathUtility;
 use TYPO3\CMS\Core\View\ViewFactoryData;
 use TYPO3\CMS\Core\View\ViewFactoryInterface;
 use TYPO3\CMS\Frontend\ContentObject\Exception\ContentRenderingException;
+use TYPO3Fluid\Fluid\View\Exception\InvalidTemplateResourceException;
 
 /**
  * PAGEVIEW Content Object.
@@ -39,8 +41,6 @@ use TYPO3\CMS\Frontend\ContentObject\Exception\ContentRenderingException;
  * - does not handle Extbase specialities
  * - does not handle HeaderAssets and FooterAssets
  * - does not handle "templateName.", "template." and "file." resolving from cObject
- *
- * @internal this cObject is considered experimental until TYPO3 v13 LTS
  */
 final class PageViewContentObject extends AbstractContentObject
 {
@@ -109,8 +109,28 @@ final class PageViewContentObject extends AbstractContentObject
             $pageInformationObject->getPageRecord(),
             $pageInformationObject->getRootLine()
         );
-
-        return $view->render('Pages/' . ucfirst($pageLayoutName));
+        $templateFileName = 'Pages/' . ucfirst($pageLayoutName);
+        try {
+            return $view->render($templateFileName);
+        } catch (InvalidTemplateResourceException $e) {
+            // Only add a PAGEVIEW specific message in case the exception has been thrown for the given $templateFileName.
+            if (str_contains($e->getMessage(), $templateFileName)) {
+                $templateFileName .= '.html';
+                $checkedPaths = implode(', ', array_map(static fn($path) => $path . $templateFileName, $paths));
+                throw new InvalidTemplateResourceException(
+                    sprintf(
+                        'PAGEVIEW TypoScript object: Failed to resolve the expected template file "%s" for layout "%s". See also: %s. The following paths were checked: %s',
+                        $templateFileName,
+                        $pageLayoutName,
+                        (new Typo3Information())->getDocsLink('t3tsref:cobj-pageview'),
+                        $checkedPaths,
+                    ),
+                    1742058289,
+                    $e
+                );
+            }
+            throw $e;
+        }
     }
 
     /**

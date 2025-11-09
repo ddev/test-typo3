@@ -458,6 +458,32 @@ settings:
     type: string
     default: ''
 
+  page.theme.socialmedia.channels.bluesky.label:
+    label: 'Bluesky Label'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: 'Bluesky'
+
+  page.theme.socialmedia.channels.bluesky.url:
+    label: 'Bluesky Url'
+    description: 'Insert the full account url'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: ''
+
+  page.theme.socialmedia.channels.mastodon.label:
+    label: 'Mastodon Label'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: 'Mastodon'
+
+  page.theme.socialmedia.channels.mastodon.url:
+    label: 'Mastodon Url'
+    description: 'Insert the full account url'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: ''
+
   page.theme.socialmedia.channels.threads.label:
     label: 'Threads Label'
     category: BootstrapPackage.socialmedia
@@ -484,6 +510,19 @@ settings:
     type: string
     default: ''
 
+  page.theme.socialmedia.channels.whatsapp.label:
+    label: 'Whatsapp Label'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: 'Whatsapp'
+
+  page.theme.socialmedia.channels.whatsapp.url:
+    label: 'Whatsapp Url'
+    description: 'Insert the full account url'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: ''
+
   page.theme.socialmedia.channels.instagram.label:
     label: 'Instagram Label'
     category: BootstrapPackage.socialmedia
@@ -505,6 +544,19 @@ settings:
 
   page.theme.socialmedia.channels.github.url:
     label: 'GitHub Url'
+    description: 'Insert the full account url'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: ''
+
+  page.theme.socialmedia.channels.researchgate.label:
+    label: 'Research Gate Label'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: 'Research Gate'
+
+  page.theme.socialmedia.channels.researchgate.url:
+    label: 'Research Gate Url'
     description: 'Insert the full account url'
     category: BootstrapPackage.socialmedia
     type: string
@@ -588,6 +640,19 @@ settings:
     type: string
     default: ''
 
+  page.theme.socialmedia.channels.discord.label:
+    label: 'Discord Label'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: 'Discord'
+
+  page.theme.socialmedia.channels.discord.url:
+    label: 'Discord Url'
+    description: 'Insert the full server url'
+    category: BootstrapPackage.socialmedia
+    type: string
+    default: ''
+
   # Template Page
   page.fluidtemplate.layoutRootPath:
     label: 'Layout Root Path'
@@ -605,7 +670,7 @@ settings:
     label: 'Template Root Path'
     category: BootstrapPackage.templates.page
     type: string
-    default: 'EXT:bootstrap_package/Resources/Private/Partials/Page/'
+    default: 'EXT:bootstrap_package/Resources/Private/Templates/Page/'
 
   # Template Block
   plugin.bootstrap_package_blocks.view.layoutRootPath:
@@ -624,7 +689,7 @@ settings:
     label: 'Template Root Path'
     category: BootstrapPackage.templates.block
     type: string
-    default: 'EXT:bootstrap_package/Resources/Private/Partials/Blocks/'
+    default: 'EXT:bootstrap_package/Resources/Private/Templates/Blocks/'
 
   # Template Plugin
   plugin.bootstrap_package.view.layoutRootPath:
@@ -643,7 +708,7 @@ settings:
     label: 'Template Root Path'
     category: BootstrapPackage.templates.plugin
     type: string
-    default: 'EXT:bootstrap_package/Resources/Private/Partials/'
+    default: 'EXT:bootstrap_package/Resources/Private/Templates/'
 
   # Settings
   plugin.bootstrap_package.settings.cssSourceMapping:
@@ -673,8 +738,8 @@ settings:
     type: string
     default: 'index,follow'
 
-  page.meta.apple-mobile-web-app-capable:
-    label: 'apple-mobile-web-app-capable'
+  page.meta.mobile-web-app-capable:
+    label: 'mobile-web-app-capable'
     category: BootstrapPackage.meta
     type: string
     default: 'no'

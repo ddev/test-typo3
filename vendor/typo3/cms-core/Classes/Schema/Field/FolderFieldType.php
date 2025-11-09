@@ -26,4 +26,23 @@ final readonly class FolderFieldType extends AbstractFieldType
     {
         return 'folder';
     }
+
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
+    public function isNullable(): false
+    {
+        return false;
+    }
+    public function hasDefaultValue(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
+    }
 }

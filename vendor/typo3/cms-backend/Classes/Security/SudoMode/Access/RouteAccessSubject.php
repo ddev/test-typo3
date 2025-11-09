@@ -68,6 +68,7 @@ class RouteAccessSubject implements AccessSubjectInterface
     {
         return [
             'class' => self::class,
+            'identity' => $this->getIdentity(),
             'subject' => $this->subject,
             'lifetime' => $this->lifetime->value,
             'group' => $this->group,
@@ -92,5 +93,10 @@ class RouteAccessSubject implements AccessSubjectInterface
     public function getLifetime(): AccessLifetime
     {
         return $this->lifetime;
+    }
+
+    public function isOnce(): bool
+    {
+        return false;
     }
 }

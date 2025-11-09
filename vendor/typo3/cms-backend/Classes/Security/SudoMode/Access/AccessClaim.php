@@ -26,21 +26,30 @@ namespace TYPO3\CMS\Backend\Security\SudoMode\Access;
 class AccessClaim implements \JsonSerializable
 {
     public readonly string $id;
+
+    /**
+     * @var AccessSubjectInterface[]
+     */
+    public readonly array $subjects;
+
     public function __construct(
-        public readonly AccessSubjectInterface $subject,
         public readonly ServerRequestInstruction $instruction,
         public readonly int $expiration,
+        public ?string $origin = null,
         ?string $id = null,
+        AccessSubjectInterface ...$subjects,
     ) {
+        $this->subjects = $subjects;
         $this->id = $id ?? bin2hex(random_bytes(20));
     }
 
     public function jsonSerialize(): array
     {
         return [
-            'subject' => $this->subject,
+            'subjects' => $this->subjects,
             'instruction' => $this->instruction,
             'expiration' => $this->expiration,
+            'origin' => $this->origin,
             'id' => $this->id,
         ];
     }

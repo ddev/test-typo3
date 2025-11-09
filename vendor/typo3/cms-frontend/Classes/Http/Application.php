@@ -26,6 +26,7 @@ use TYPO3\CMS\Core\Context\UserAspect;
 use TYPO3\CMS\Core\Context\VisibilityAspect;
 use TYPO3\CMS\Core\Context\WorkspaceAspect;
 use TYPO3\CMS\Core\Core\SystemEnvironmentBuilder;
+use TYPO3\CMS\Core\Domain\DateTimeFactory;
 use TYPO3\CMS\Core\Http\AbstractApplication;
 
 /**
@@ -54,12 +55,7 @@ class Application extends AbstractApplication
      */
     protected function initializeContext(): void
     {
-        $this->context->setAspect(
-            'date',
-            new DateTimeAspect(
-                (new \DateTimeImmutable())->setTimestamp($GLOBALS['EXEC_TIME'])
-            )
-        );
+        $this->context->setAspect('date', new DateTimeAspect(DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME'])));
         $this->context->setAspect('visibility', new VisibilityAspect());
         $this->context->setAspect('workspace', new WorkspaceAspect(0));
         $this->context->setAspect('backend.user', new UserAspect(null));

@@ -18,7 +18,6 @@ declare(strict_types=1);
 namespace TYPO3\CMS\Fluid\ViewHelpers\Uri;
 
 use Psr\Http\Message\ServerRequestInterface;
-use TYPO3\CMS\Core\Resource\Exception\InvalidFileException;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Core\Utility\PathUtility;
 use TYPO3\CMS\Extbase\Mvc\RequestInterface;
@@ -27,54 +26,20 @@ use TYPO3Fluid\Fluid\Core\Rendering\RenderingContextInterface;
 use TYPO3Fluid\Fluid\Core\ViewHelper\AbstractViewHelper;
 
 /**
- * A ViewHelper for creating URIs to resources.
+ * ViewHelper for creating URIs to resources (assets).
  *
- * This ViewHelper should be used for extension resource files.
+ * This ViewHelper should be used to return public locations to extension resource files
+ * for use in the frontend output.
  *
  * For images within FAL storages, or where graphical operations are
- * performed, use :ref:`<f:uri.image> <typo3-fluid-uri-image>` instead.
+ * performed, use `<f:uri.image>` instead.
  *
- * Examples
- * ========
+ * ```
+ *   <link href="{f:uri.resource(path:'EXT:indexed_search/Resources/Public/Css/Stylesheet.css')}" rel="stylesheet" />
+ * ```
  *
- * Best practice with EXT: syntax
- * ------------------------------
- *
- * ::
- *
- *    <link href="{f:uri.resource(path:'EXT:indexed_search/Resources/Public/Css/Stylesheet.css')}" rel="stylesheet" />
- *
- * Output::
- *
- *    <link href="typo3/sysext/indexed_search/Resources/Public/Css/Stylesheet.css" rel="stylesheet" />
- *
- * Preferred syntax that works in both extbase and non-extbase context.
- *
- * Defaults
- * --------
- *
- * ::
- *
- *    <link href="{f:uri.resource(path:'Css/Stylesheet.css')}" rel="stylesheet" />
- *
- * Output::
- *
- *    <link href="typo3conf/ext/example_extension/Resources/Public/Css/Stylesheet.css" rel="stylesheet" />
- *
- * Works only in extbase context since it uses the extbase request to find current extension, magically adds 'Resources/Public' to path.
- *
- * With extension name
- * -------------------
- *
- * ::
- *
- *    <link href="{f:uri.resource(path:'Css/Stylesheet.css', extensionName: 'AnotherExtension')}" rel="stylesheet" />
- *
- * Output::
- *
- *    <link href="typo3conf/ext/another_extension/Resources/Public/Css/Stylesheet.css" rel="stylesheet" />
- *
- * Magically adds 'Resources/Public' to path.
+ * @see https://docs.typo3.org/permalink/t3viewhelper:typo3-fluid-uri-resource
+ * @see https://docs.typo3.org/permalink/t3viewhelper:typo3-fluid-uri-image
  */
 final class ResourceViewHelper extends AbstractViewHelper
 {
@@ -90,15 +55,16 @@ final class ResourceViewHelper extends AbstractViewHelper
      * Render the URI to the resource. The filename is used from child content.
      *
      * @return string The URI to the resource
-     * @throws InvalidFileException
      * @throws \RuntimeException
      */
     public function render(): string
     {
-        $uri = PathUtility::getPublicResourceWebPath(self::resolveExtensionPath($this->arguments, $this->renderingContext));
+        $uri = self::resolveExtensionPath($this->arguments, $this->renderingContext);
+        $uri = GeneralUtility::getFileAbsFileName($uri);
         if ($this->arguments['useCacheBusting']) {
             $uri = GeneralUtility::createVersionNumberedFilename($uri);
         }
+        $uri = PathUtility::getAbsoluteWebPath($uri);
         if ($this->arguments['absolute']) {
             $uri = GeneralUtility::locationHeaderUrl($uri);
         }

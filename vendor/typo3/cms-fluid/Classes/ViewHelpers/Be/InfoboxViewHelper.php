@@ -27,37 +27,12 @@ use TYPO3Fluid\Fluid\Core\ViewHelper\AbstractViewHelper;
 /**
  * ViewHelper for rendering a styled content infobox markup.
  *
- * States
- * ======
+ * ```
+ *   <f:be.infobox title="Message title">your box content</f:be.infobox>
+ *   <f:be.infobox title="Error!" state="{f:constant(name: 'TYPO3\CMS\Fluid\ViewHelpers\Be\InfoboxViewHelper::STATE_ERROR')}" iconName="check">your box content</f:be.infobox>
+ * ```
  *
- * The Infobox provides different context sensitive states that
- * can be used to provide an additional visual feedback to the
- * to the user to underline the meaning of the information.
- *
- * Possible values are in range from ``-2`` to ``2``. Please choose a
- * meaningful value from the following list.
- *
- * ``-2``
- *    Notices (Default)
- * ``-1``
- *    Information
- * ``0``
- *    Positive feedback
- * ``1``
- *    Warnings
- * ``2``
- *    Error
- *
- * Examples
- * ========
- *
- * Simple::
- *
- *    <f:be.infobox title="Message title">your box content</f:be.infobox>
- *
- * All options::
- *
- *    <f:be.infobox title="Message title" message="your box content" state="{f:constant(name: 'TYPO3\CMS\Fluid\ViewHelpers\Be\InfoboxViewHelper::STATE_NOTICE')}" iconName="check" disableIcon="true" />
+ * @see https://docs.typo3.org/permalink/t3viewhelper:typo3-fluid-be-infobox
  */
 final class InfoboxViewHelper extends AbstractViewHelper
 {
@@ -79,7 +54,7 @@ final class InfoboxViewHelper extends AbstractViewHelper
         $this->registerArgument('message', 'string', 'The message of the info box, if NULL tag content is used');
         $this->registerArgument('title', 'string', 'The title of the info box');
         $this->registerArgument('state', 'int', 'The state of the box, InfoboxViewHelper::STATE_*', false, self::STATE_NOTICE);
-        $this->registerArgument('iconName', 'string', 'The icon name from font awesome, NULL sets default icon');
+        $this->registerArgument('iconName', 'string', 'Identifier of the icon as registered in the Icon Registry. NULL sets default icon');
         $this->registerArgument('disableIcon', 'bool', 'If set to TRUE, the icon is not rendered.', false, false);
     }
 

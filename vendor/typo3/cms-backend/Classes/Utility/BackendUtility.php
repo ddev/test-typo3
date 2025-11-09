@@ -33,12 +33,14 @@ use TYPO3\CMS\Core\Database\Query\Restriction\DeletedRestriction;
 use TYPO3\CMS\Core\Database\Query\Restriction\WorkspaceRestriction;
 use TYPO3\CMS\Core\Database\RelationHandler;
 use TYPO3\CMS\Core\DataHandling\ItemProcessingService;
+use TYPO3\CMS\Core\Domain\DateTimeFactory;
 use TYPO3\CMS\Core\Domain\Repository\PageRepository;
 use TYPO3\CMS\Core\Exception\SiteNotFoundException;
 use TYPO3\CMS\Core\Imaging\IconFactory;
 use TYPO3\CMS\Core\Imaging\IconSize;
 use TYPO3\CMS\Core\Imaging\ImageDimension;
 use TYPO3\CMS\Core\Imaging\ImageManipulation\CropVariantCollection;
+use TYPO3\CMS\Core\Localization\DateFormatter;
 use TYPO3\CMS\Core\Localization\LanguageService;
 use TYPO3\CMS\Core\Log\LogManager;
 use TYPO3\CMS\Core\Resource\Exception\FileDoesNotExistException;
@@ -84,7 +86,7 @@ class BackendUtility
      * @param bool $useDeleteClause Use the deleteClause to check if a record is deleted (default TRUE)
      * @return array|null Returns the row if found, otherwise NULL
      */
-    public static function getRecord($table, $uid, $fields = '*', $where = '', $useDeleteClause = true): ?array
+    public static function getRecord(string $table, $uid, $fields = '*', $where = '', $useDeleteClause = true): ?array
     {
         if (empty($GLOBALS['TCA'][$table])
             || !MathUtility::canBeInterpretedAsInteger($uid)
@@ -98,7 +100,7 @@ class BackendUtility
             return null;
         }
         $uid = (int)$uid;
-        $queryBuilder = static::getQueryBuilderForTable($table);
+        $queryBuilder = self::getQueryBuilderForTable($table);
         $queryBuilder->getRestrictions()->removeAll();
         if ($useDeleteClause) {
             $queryBuilder->getRestrictions()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
@@ -214,11 +216,10 @@ class BackendUtility
      * @return string WHERE clause part
      * @internal should only be used from within TYPO3 Core, but DefaultRestrictionHandler is recommended as alternative
      */
-    public static function BEenableFields($table, $inv = false)
+    public static function BEenableFields(string $table, $inv = false): string
     {
         $ctrl = $GLOBALS['TCA'][$table]['ctrl'] ?? [];
-        $expressionBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
-            ->getConnectionForTable($table)
+        $expressionBuilder = self::getConnectionForTable($table)
             ->getExpressionBuilder();
         $query = $expressionBuilder->and();
         $invQuery = $expressionBuilder->or();
@@ -276,15 +277,14 @@ class BackendUtility
      * @param string $andWhereClause Optional additional WHERE clause (default: '')
      * @return mixed Multidimensional array with selected records, empty array if none exists and FALSE if table is not localizable
      */
-    public static function getRecordLocalization($table, $uid, $language, $andWhereClause = '')
+    public static function getRecordLocalization(string $table, $uid, $language, $andWhereClause = '')
     {
         $recordLocalization = false;
 
         if (self::isTableLocalizable($table)) {
             $tcaCtrl = $GLOBALS['TCA'][$table]['ctrl'];
 
-            $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
-                ->getQueryBuilderForTable($table);
+            $queryBuilder = self::getQueryBuilderForTable($table);
             $queryBuilder->getRestrictions()
                 ->removeAll()
                 ->add(GeneralUtility::makeInstance(DeletedRestriction::class))
@@ -332,9 +332,10 @@ class BackendUtility
      * @param bool $workspaceOL If TRUE, version overlay is applied. This must be requested specifically because it is
      *          usually only wanted when the rootline is used for visual output while for permission checking you want the raw thing!
      * @param string[] $additionalFields Additional Fields to select for rootline records
+     * @param bool $useDeleteClause Use the deleteClause to check if a record is deleted (default TRUE)
      * @return array Root line array, all the way to the page tree root uid=0 (or as far as $clause allows!), including the page given as $uid
      */
-    public static function BEgetRootLine($uid, $clause = '', $workspaceOL = false, array $additionalFields = [])
+    public static function BEgetRootLine($uid, $clause = '', $workspaceOL = false, array $additionalFields = [], bool $useDeleteClause = true)
     {
         $runtimeCache = GeneralUtility::makeInstance(CacheManager::class)->getCache('runtime');
         $beGetRootLineCache = $runtimeCache->get('backendUtilityBeGetRootLine') ?: [];
@@ -348,7 +349,7 @@ class BackendUtility
             $theRowArray = [];
             while ($uid != 0 && $loopCheck) {
                 $loopCheck--;
-                $row = self::getPageForRootline($uid, $clause, $workspaceOL, $additionalFields);
+                $row = self::getPageForRootline($uid, $clause, $workspaceOL, $additionalFields, $useDeleteClause);
                 if (is_array($row)) {
                     $uid = $row['pid'];
                     $theRowArray[] = $row;
@@ -407,14 +408,15 @@ class BackendUtility
      * @param string $clause Clause can be used to select other criteria. It would typically be where-clauses that stops the process if we meet a page, the user has no reading access to.
      * @param bool $workspaceOL If TRUE, version overlay is applied. This must be requested specifically because it is usually only wanted when the rootline is used for visual output while for permission checking you want the raw thing!
      * @param string[] $additionalFields AdditionalFields to fetch from the root line
+     * @param bool $useDeleteClause Use the deleteClause to check if a record is deleted (default TRUE)
      * @return array Cached page record for the rootline
      * @see BEgetRootLine
      */
-    protected static function getPageForRootline($uid, $clause, $workspaceOL, array $additionalFields = [])
+    protected static function getPageForRootline($uid, $clause, $workspaceOL, array $additionalFields = [], bool $useDeleteClause = true)
     {
         $runtimeCache = GeneralUtility::makeInstance(CacheManager::class)->getCache('runtime');
         $pageForRootlineCache = $runtimeCache->get('backendUtilityPageForRootLine') ?: [];
-        $statementCacheIdent = md5($clause . ($additionalFields ? '-' . implode(',', $additionalFields) : ''));
+        $statementCacheIdent = md5($clause . ($additionalFields ? '-' . implode(',', $additionalFields) : '') . ($useDeleteClause ? '-delete' : ''));
         $ident = $uid . '-' . $workspaceOL . '-' . $statementCacheIdent;
         if (is_array($pageForRootlineCache[$ident] ?? false)) {
             $row = $pageForRootlineCache[$ident];
@@ -422,11 +424,11 @@ class BackendUtility
             /** @var Statement $statement */
             $statement = $runtimeCache->get('getPageForRootlineStatement-' . $statementCacheIdent);
             if (!$statement) {
-                $queryBuilder = static::getQueryBuilderForTable('pages');
-                $queryBuilder->getRestrictions()
-                             ->removeAll()
-                             ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
-
+                $queryBuilder = self::getQueryBuilderForTable('pages');
+                $queryBuilder->getRestrictions()->removeAll();
+                if ($useDeleteClause) {
+                    $queryBuilder->getRestrictions()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+                }
                 $queryBuilder
                     ->select(
                         'pid',
@@ -491,7 +493,7 @@ class BackendUtility
         if ($pageUid === 0) {
             return [];
         }
-        $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)->getQueryBuilderForTable('pages');
+        $queryBuilder = self::getQueryBuilderForTable('pages');
         $queryBuilder->getRestrictions()->removeAll()
             ->add(GeneralUtility::makeInstance(DeletedRestriction::class))
             ->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, self::getBackendUserAuthentication()->workspace));
@@ -596,7 +598,7 @@ class BackendUtility
      * @param string $table The table to check
      * @return bool Whether a table is localizable
      */
-    public static function isTableLocalizable($table)
+    public static function isTableLocalizable(string $table): bool
     {
         $isLocalizable = false;
         if (isset($GLOBALS['TCA'][$table]['ctrl']) && is_array($GLOBALS['TCA'][$table]['ctrl'])) {
@@ -736,9 +738,9 @@ class BackendUtility
      * this method from being a memory hog, a two-level-cache is implemented:
      * Many pages typically share the same page TSconfig. We get the rootline
      * of a page, and create a hash from the two relevant TSconfig and
-     * tsconfig_includes fields, plus the attached site identifier. We then
-     * store a hash-to-object cache entry per different hash, and a
-     * page uid-to-hash pointer.
+     * tsconfig_includes fields, the attached site identifier, plus the hash of
+     * matched conditions. We then store a hash-to-object cache entry per
+     * different hash, and a page uid-to-hash pointer.
      *
      * @param int $pageUid
      */
@@ -764,7 +766,10 @@ class BackendUtility
             $site = new NullSite();
         }
 
-        $cacheRelevantData = $site->getIdentifier();
+        $pageTsConfigFactory = GeneralUtility::makeInstance(PageTsConfigFactory::class);
+        $pageTsConfig = $pageTsConfigFactory->create($fullRootLine, $site, static::getBackendUserAuthentication()?->getUserTsConfig());
+
+        $cacheRelevantData = $site->getIdentifier() . json_encode($pageTsConfig->getConditionListWithVerdicts(), JSON_THROW_ON_ERROR);
         foreach ($fullRootLine as $rootLine) {
             if (!empty($rootLine['TSconfig'])) {
                 $cacheRelevantData .= (string)$rootLine['TSconfig'];
@@ -773,19 +778,10 @@ class BackendUtility
                 $cacheRelevantData .= (string)$rootLine['tsconfig_includes'];
             }
         }
-        $cacheRelevantDataHash = hash('xxh3', $cacheRelevantData);
+        $pageTsConfigHash = hash('xxh3', $cacheRelevantData);
 
-        $pageTsConfig = $runtimeCache->get('pageTsConfig-hash-to-object-' . $cacheRelevantDataHash);
-        if ($pageTsConfig instanceof PageTsConfig) {
-            $runtimeCache->set('pageTsConfig-pid-to-hash-' . $pageUid, $cacheRelevantDataHash);
-            return $pageTsConfig->getPageTsConfigArray();
-        }
-
-        $pageTsConfigFactory = GeneralUtility::makeInstance(PageTsConfigFactory::class);
-        $pageTsConfig = $pageTsConfigFactory->create($fullRootLine, $site, static::getBackendUserAuthentication()?->getUserTsConfig());
-
-        $runtimeCache->set('pageTsConfig-pid-to-hash-' . $pageUid, $cacheRelevantDataHash);
-        $runtimeCache->set('pageTsConfig-hash-to-object-' . $cacheRelevantDataHash, $pageTsConfig);
+        $runtimeCache->set('pageTsConfig-pid-to-hash-' . $pageUid, $pageTsConfigHash);
+        $runtimeCache->set('pageTsConfig-hash-to-object-' . $pageTsConfigHash, $pageTsConfig);
         return $pageTsConfig->getPageTsConfigArray();
     }
 
@@ -842,7 +838,7 @@ class BackendUtility
      * @param string $where Additional where clause
      * @return array Array of sorted records
      */
-    protected static function getRecordsSortedByTitle(array $fields, $table, $titleField, $where = '')
+    protected static function getRecordsSortedByTitle(array $fields, string $table, $titleField, $where = ''): array
     {
         $fieldsIndex = array_flip($fields);
         // Make sure the titleField is amongst the fields when getting sorted
@@ -850,7 +846,7 @@ class BackendUtility
 
         $result = [];
 
-        $queryBuilder = static::getQueryBuilderForTable($table);
+        $queryBuilder = self::getQueryBuilderForTable($table);
         $queryBuilder->getRestrictions()
             ->removeAll()
             ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
@@ -933,29 +929,20 @@ class BackendUtility
     /**
      * Returns the "age" in minutes / hours / days / years of the number of $seconds inputted.
      *
-     * @param int $seconds Seconds could be the difference of a certain timestamp and time()
+     * @param int $seconds Seconds is the difference of current time() and a certain timestamp
      * @param string $labels Labels should be something like ' min| hrs| days| yrs| min| hour| day| year'. This value is typically delivered by this function call: $GLOBALS["LANG"]->sL("LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.minutesHoursDaysYears")
      * @return string Formatted time
      */
     public static function calcAge($seconds, $labels = 'min|hrs|days|yrs|min|hour|day|year')
     {
-        $labelArr = GeneralUtility::trimExplode('|', $labels, true);
-        $absSeconds = abs($seconds);
-        $sign = $seconds < 0 ? -1 : 1;
-        if ($absSeconds < 3600) {
-            $val = round($absSeconds / 60);
-            $seconds = $sign * $val . ' ' . ($val == 1 ? $labelArr[4] : $labelArr[0]);
-        } elseif ($absSeconds < 24 * 3600) {
-            $val = round($absSeconds / 3600);
-            $seconds = $sign * $val . ' ' . ($val == 1 ? $labelArr[5] : $labelArr[1]);
-        } elseif ($absSeconds < 365 * 24 * 3600) {
-            $val = round($absSeconds / (24 * 3600));
-            $seconds = $sign * $val . ' ' . ($val == 1 ? $labelArr[6] : $labelArr[2]);
-        } else {
-            $val = round($absSeconds / (365 * 24 * 3600));
-            $seconds = $sign * $val . ' ' . ($val == 1 ? $labelArr[7] : $labelArr[3]);
-        }
-        return $seconds;
+        $now = DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME']);
+        $then = DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME'] - $seconds);
+        // Show past dates without a leading sign, but future dates with.
+        // This does not make sense, but is kept for legacy reasons.
+        $sign = $then > $now ? '-' : '';
+        // Take an absolute diff, since we don't want formatDateInterval to output the (correct) sign
+        $diff = $now->diff($then, true);
+        return $sign . (new DateFormatter())->formatDateInterval($diff, $labels);
     }
 
     /**
@@ -1383,8 +1370,7 @@ class BackendUtility
     {
         $pageTsConfig = static::getPagesTSconfig($pageId);
         $label = '';
-        if (isset($pageTsConfig['TCEFORM.'])
-            && is_array($pageTsConfig['TCEFORM.'] ?? null)
+        if (is_array($pageTsConfig['TCEFORM.'] ?? null)
             && is_array($pageTsConfig['TCEFORM.'][$table . '.'] ?? null)
             && is_array($pageTsConfig['TCEFORM.'][$table . '.'][$column . '.'] ?? null)
         ) {
@@ -1625,7 +1611,7 @@ class BackendUtility
      * @param int $pid Optional page uid is used to evaluate page TSconfig for the given field
      * @param array $fullRow Optional full database row to provide additional context, e.g. to be used in itemsProcFunc
      * @throws \InvalidArgumentException
-     * @return string|null
+     * @return string|int|null
      */
     public static function getProcessedValue(
         $table,
@@ -1770,58 +1756,32 @@ class BackendUtility
                 }
                 break;
             case 'datetime':
-                $format = (string)($theColConf['format'] ?? 'datetime');
-                $dateTimeFormats = QueryHelper::getDateTimeFormats();
-                if ($format === 'date') {
-                    // Handle native date field
-                    if (($theColConf['dbType'] ?? '') === 'date') {
-                        $value = $value === $dateTimeFormats['date']['empty'] ? 0 : (int)strtotime((string)$value);
-                    } else {
-                        $value = (int)$value;
+                try {
+                    $datetime = DateTimeFactory::createFomDatabaseValueAndTCAConfig($value, $theColConf);
+                    $format = DateTimeFactory::getFormatFromTCAConfig($theColConf);
+                } catch (\InvalidArgumentException) {
+                    $datetime = false;
+                    $format = null;
+                }
+                if ($datetime === null) {
+                    $l = '';
+                } elseif ($format === 'date') {
+                    $ageSuffix = '';
+                    // Generate age suffix as long as not explicitly suppressed
+                    if (!($theColConf['disableAgeDisplay'] ?? false)) {
+                        $now = DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME']);
+                        $ageSuffix = sprintf(' (%s)', (new DateFormatter())->formatDateInterval(
+                            $now->diff($datetime),
+                            $lang->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.minutesHoursDaysYears')
+                        ));
                     }
-                    if (!empty($value)) {
-                        $ageSuffix = '';
-                        // Generate age suffix as long as not explicitly suppressed
-                        if (!($theColConf['disableAgeDisplay'] ?? false)) {
-                            $ageDelta = $GLOBALS['EXEC_TIME'] - $value;
-                            $calculatedAge = self::calcAge(
-                                (int)abs($ageDelta),
-                                $lang->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.minutesHoursDaysYears')
-                            );
-                            $ageSuffix = ' (' . ($ageDelta > 0 ? '-' : '') . $calculatedAge . ')';
-                        }
-                        $l = self::date($value) . $ageSuffix;
-                    }
+                    $l = self::date($datetime->getTimestamp()) . $ageSuffix;
                 } elseif ($format === 'time') {
-                    // Handle native time field
-                    if (($theColConf['dbType'] ?? '') === 'time') {
-                        $value = $value === $dateTimeFormats['time']['empty'] ? 0 : (int)strtotime('1970-01-01 ' . $value . ' UTC');
-                    } else {
-                        $value = (int)$value;
-                    }
-                    if (!empty($value)) {
-                        $l = gmdate('H:i', (int)$value);
-                    }
+                    $l = $datetime->format('H:i');
                 } elseif ($format === 'timesec') {
-                    // Handle native time field
-                    if (($theColConf['dbType'] ?? '') === 'time') {
-                        $value = $value === $dateTimeFormats['time']['empty'] ? 0 : (int)strtotime('1970-01-01 ' . $value . ' UTC');
-                    } else {
-                        $value = (int)$value;
-                    }
-                    if (!empty($value)) {
-                        $l = gmdate('H:i:s', (int)$value);
-                    }
+                    $l = $datetime->format('H:i:s');
                 } elseif ($format === 'datetime') {
-                    // Handle native datetime field
-                    if (($theColConf['dbType'] ?? '') === 'datetime') {
-                        $value = $value === $dateTimeFormats['datetime']['empty'] ? 0 : (int)strtotime((string)$value);
-                    } else {
-                        $value = (int)$value;
-                    }
-                    if (!empty($value)) {
-                        $l = self::datetime($value);
-                    }
+                    $l = self::datetime($datetime->getTimestamp());
                 } elseif (isset($value)) {
                     // todo: As soon as more strict types are used, this isset check must be replaced with a more
                     //       appropriate check.
@@ -2312,7 +2272,7 @@ class BackendUtility
      * @param int $pid Record pid
      * @internal
      */
-    public static function lockRecords($table = '', $uid = 0, $pid = 0)
+    public static function lockRecords(string $table = '', $uid = 0, $pid = 0): void
     {
         $beUser = static::getBackendUserAuthentication();
         if (isset($beUser->user['uid'])) {
@@ -2327,15 +2287,13 @@ class BackendUtility
                     'username' => $beUser->user['username'],
                     'record_pid' => $pid,
                 ];
-                GeneralUtility::makeInstance(ConnectionPool::class)
-                    ->getConnectionForTable('sys_lockedrecords')
+                self::getConnectionForTable('sys_lockedrecords')
                     ->insert(
                         'sys_lockedrecords',
                         $fieldsValues
                     );
             } else {
-                GeneralUtility::makeInstance(ConnectionPool::class)
-                    ->getConnectionForTable('sys_lockedrecords')
+                self::getConnectionForTable('sys_lockedrecords')
                     ->delete(
                         'sys_lockedrecords',
                         ['userid' => (int)$userId]
@@ -2366,7 +2324,7 @@ class BackendUtility
         } else {
             $lockedRecords = [];
 
-            $queryBuilder = static::getQueryBuilderForTable('sys_lockedrecords');
+            $queryBuilder = self::getQueryBuilderForTable('sys_lockedrecords');
             $result = $queryBuilder
                 ->select('*')
                 ->from('sys_lockedrecords')
@@ -2422,7 +2380,7 @@ class BackendUtility
                     )
                 );
                 if ($row['record_pid'] && !isset($lockedRecords[$row['record_table'] . ':' . $row['record_pid']])) {
-                    $lockedRecords['pages:' . ($row['record_pid'] ?? '')]['msg'] = sprintf(
+                    $lockedRecords['pages:' . $row['record_pid']]['msg'] = sprintf(
                         $lang->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.lockedRecordUser_content'),
                         $userType,
                         $userName,
@@ -2590,7 +2548,7 @@ class BackendUtility
     {
         if ($count === null && MathUtility::canBeInterpretedAsInteger($ref)) {
             // MathUtility::canBeInterpretedAsInteger($ref) and no method type hint for b/w compat.
-            $queryBuilder = static::getQueryBuilderForTable('sys_refindex');
+            $queryBuilder = self::getQueryBuilderForTable('sys_refindex');
             $queryBuilder->count('*')->from('sys_refindex')
                 ->where(
                     $queryBuilder->expr()->eq('ref_table', $queryBuilder->createNamedParameter($table)),
@@ -2615,13 +2573,13 @@ class BackendUtility
      * @param string $msg Message with %s, eg. "This record has %s translation(s) which will be deleted, too!
      * @return string Output string (or int count value if no msg string specified)
      */
-    public static function translationCount($table, $ref, $msg = '')
+    public static function translationCount(string $table, $ref, $msg = ''): string
     {
         $count = 0;
         if (($GLOBALS['TCA'][$table]['ctrl']['languageField'] ?? null)
             && ($GLOBALS['TCA'][$table]['ctrl']['transOrigPointerField'] ?? null)
         ) {
-            $queryBuilder = static::getQueryBuilderForTable($table);
+            $queryBuilder = self::getQueryBuilderForTable($table);
             $queryBuilder->getRestrictions()
                 ->removeAll()
                 ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
@@ -2667,13 +2625,13 @@ class BackendUtility
      * @internal should only be used from within TYPO3 Core
      */
     public static function selectVersionsOfRecord(
-        $table,
+        string $table,
         $uid,
         $fields = '*',
         $workspace = 0,
         $includeDeletedRecords = false,
         $row = null
-    ) {
+    ): ?array {
         if (!static::isTableWorkspaceEnabled($table)) {
             return null;
         }
@@ -2692,7 +2650,7 @@ class BackendUtility
             }
         }
 
-        $queryBuilder = static::getQueryBuilderForTable($table);
+        $queryBuilder = self::getQueryBuilderForTable($table);
         $queryBuilder->getRestrictions()->removeAll();
 
         // build fields to select
@@ -2750,9 +2708,11 @@ class BackendUtility
      * and "ORIG_pid" will contain the live pid.
      *
      * @param string $table Table name
-     * @param array|null $row Record by reference. At least "uid", "pid", "t3ver_oid" and "t3ver_state" must be set. Keys not prefixed with '_' are used as field names in SQL.
+     * @param array|null $row Record by reference. At least "uid", "pid", "t3ver_oid" and "t3ver_state" must be set.
+     *                        Keys not prefixed with '_' are used as field names in SQL.
      * @param int $wsid Workspace ID, if not specified will use static::getBackendUserAuthentication()->workspace
      * @param bool $unsetMovePointers If TRUE the function does not return a "pointer" row for moved records in a workspace
+     * @param-out false|array|null $row
      */
     public static function workspaceOL($table, &$row, $wsid = -99, $unsetMovePointers = false)
     {
@@ -2784,18 +2744,12 @@ class BackendUtility
             $wsid,
             $table,
             $row['uid'],
-            implode(',', static::purgeComputedPropertyNames(array_keys($row)))
+            implode(',', static::purgeComputedPropertyNames(array_keys($row + ['t3ver_state' => null])))
         );
 
         // If version was found, swap the default record with that one.
         if (is_array($wsAlt)) {
-            // If t3ver_state is not found, then find it... (but we like best if it is here...)
-            if (!isset($wsAlt['t3ver_state'])) {
-                $stateRec = self::getRecord($table, $wsAlt['uid'], 't3ver_state');
-                $versionState = VersionState::tryFrom($stateRec['t3ver_state'] ?? 0);
-            } else {
-                $versionState = VersionState::tryFrom($wsAlt['t3ver_state']);
-            }
+            $versionState = VersionState::tryFrom($wsAlt['t3ver_state'] ?? 0);
             // Check if this is in move-state
             if ($versionState === VersionState::MOVE_POINTER) {
                 // @todo Same problem as frontend in versionOL(). See TODO point there and todo above.
@@ -2812,8 +2766,6 @@ class BackendUtility
                 $wsAlt['_ORIG_uid'] = $wsAlt['uid'];
                 $wsAlt['uid'] = $row['uid'];
             }
-            // Backend css class:
-            $wsAlt['_CSSCLASS'] = 'ver-element';
             // Changing input record to the workspace version alternative:
             $row = $wsAlt;
         }
@@ -2826,53 +2778,50 @@ class BackendUtility
      * @param string $table Table name to select from
      * @param int $uid Record uid for which to find workspace version.
      * @param string $fields Field list to select
-     * @return array|bool If found, return record, otherwise false
+     * @return array|false If found, return record, otherwise false
      */
-    public static function getWorkspaceVersionOfRecord($workspace, $table, $uid, $fields = '*')
+    public static function getWorkspaceVersionOfRecord($workspace, string $table, $uid, $fields = '*'): array|false
     {
-        if (ExtensionManagementUtility::isLoaded('workspaces')) {
-            if ($workspace !== 0 && self::isTableWorkspaceEnabled($table)) {
-                // Select workspace version of record:
-                $queryBuilder = static::getQueryBuilderForTable($table);
-                $queryBuilder->getRestrictions()
-                    ->removeAll()
-                    ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
-
-                // build fields to select
-                $queryBuilder->select(...GeneralUtility::trimExplode(',', $fields));
-
-                $row = $queryBuilder
-                    ->from($table)
-                    ->where(
-                        $queryBuilder->expr()->eq(
-                            't3ver_wsid',
-                            $queryBuilder->createNamedParameter($workspace, Connection::PARAM_INT)
-                        ),
-                        $queryBuilder->expr()->or(
-                            // t3ver_state=1 does not contain a t3ver_oid, and returns itself
-                            $queryBuilder->expr()->and(
-                                $queryBuilder->expr()->eq(
-                                    'uid',
-                                    $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT)
-                                ),
-                                $queryBuilder->expr()->eq(
-                                    't3ver_state',
-                                    $queryBuilder->createNamedParameter(VersionState::NEW_PLACEHOLDER->value, Connection::PARAM_INT)
-                                )
-                            ),
-                            $queryBuilder->expr()->eq(
-                                't3ver_oid',
-                                $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT)
-                            )
-                        )
-                    )
-                    ->executeQuery()
-                    ->fetchAssociative();
-
-                return $row;
-            }
+        if ($workspace === 0
+            || !ExtensionManagementUtility::isLoaded('workspaces')
+            || !self::isTableWorkspaceEnabled($table)
+        ) {
+            return false;
         }
-        return false;
+        $queryBuilder = self::getQueryBuilderForTable($table);
+        $queryBuilder->getRestrictions()
+            ->removeAll()
+            // Workspace records aren't soft-delete aware: deleted=1 & t3ver_wsid>0 should not exist.
+            // It should be fine to add the restriction to not accidentally catch invalid records.
+            ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+        return $queryBuilder
+            ->select(...GeneralUtility::trimExplode(',', $fields))
+            ->from($table)
+            ->where(
+                $queryBuilder->expr()->eq(
+                    't3ver_wsid',
+                    $queryBuilder->createNamedParameter($workspace, Connection::PARAM_INT)
+                ),
+                $queryBuilder->expr()->or(
+                    // t3ver_state=1 does not contain a t3ver_oid, and returns itself
+                    $queryBuilder->expr()->and(
+                        $queryBuilder->expr()->eq(
+                            'uid',
+                            $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT)
+                        ),
+                        $queryBuilder->expr()->eq(
+                            't3ver_state',
+                            $queryBuilder->createNamedParameter(VersionState::NEW_PLACEHOLDER->value, Connection::PARAM_INT)
+                        )
+                    ),
+                    $queryBuilder->expr()->eq(
+                        't3ver_oid',
+                        $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT)
+                    )
+                )
+            )
+            ->executeQuery()
+            ->fetchAssociative();
     }
 
     /**
@@ -2895,7 +2844,7 @@ class BackendUtility
         $connection = self::getConnectionForTable($table);
         $maxChunk = PlatformInformation::getMaxBindParameters($connection->getDatabasePlatform());
         foreach (array_chunk($liveRecordIds, (int)floor($maxChunk / 2)) as $liveRecordIdChunk) {
-            $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)->getQueryBuilderForTable($table);
+            $queryBuilder = self::getQueryBuilderForTable($table);
             $doOverlaysForRecordsStatement = $queryBuilder
                 ->select('t3ver_oid', 'uid')
                 ->from($table)
@@ -2918,6 +2867,7 @@ class BackendUtility
      * @param int|string $uid Record UID of draft, offline version
      * @param string $fields Field list, default is *
      * @return array|null If found, the record, otherwise NULL
+     * @todo: Warning. If uid is a 'new placeholder' record in workspaces, this row is returned.
      */
     public static function getLiveVersionOfRecord($table, $uid, $fields = '*')
     {
@@ -2935,6 +2885,7 @@ class BackendUtility
      * @param int|string $uid Uid of the offline/draft record
      * @return int|null The id of the live version of the record (or NULL if nothing was found)
      * @internal should only be used from within TYPO3 Core
+     * @todo: Warning. If uid is a 'new placeholder' record in workspaces, this is considered the 'live' uid!
      */
     public static function getLiveVersionIdOfRecord($table, $uid)
     {
@@ -2990,7 +2941,7 @@ class BackendUtility
      * @param string $table Name of the table to be checked
      * @return bool
      */
-    public static function isTableWorkspaceEnabled($table)
+    public static function isTableWorkspaceEnabled(string $table): bool
     {
         return !empty($GLOBALS['TCA'][$table]['ctrl']['versioningWS']);
     }
@@ -3115,7 +3066,7 @@ class BackendUtility
         if (!is_array($tableTca) || $tableTca === []) {
             return $row;
         }
-        $platform = static::getConnectionForTable($table)->getDatabasePlatform();
+        $platform = self::getConnectionForTable($table)->getDatabasePlatform();
         foreach ($row as $field => $value) {
             // @todo Only handle specific TCA type=json
             if (($tableTca['columns'][$field]['config']['type'] ?? '') === 'json') {
@@ -3125,28 +3076,17 @@ class BackendUtility
         return $row;
     }
 
-    /**
-     * @param string $table
-     * @return Connection
-     */
-    protected static function getConnectionForTable($table)
+    protected static function getConnectionForTable(string $table): Connection
     {
         return GeneralUtility::makeInstance(ConnectionPool::class)->getConnectionForTable($table);
     }
 
-    /**
-     * @param string $table
-     * @return QueryBuilder
-     */
-    protected static function getQueryBuilderForTable($table)
+    protected static function getQueryBuilderForTable(string $table): QueryBuilder
     {
         return GeneralUtility::makeInstance(ConnectionPool::class)->getQueryBuilderForTable($table);
     }
 
-    /**
-     * @return LoggerInterface
-     */
-    protected static function getLogger()
+    protected static function getLogger(): LoggerInterface
     {
         return GeneralUtility::makeInstance(LogManager::class)->getLogger(__CLASS__);
     }

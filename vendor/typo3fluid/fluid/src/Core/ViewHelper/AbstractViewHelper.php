@@ -9,7 +9,6 @@ namespace TYPO3Fluid\Fluid\Core\ViewHelper;
 
 use TYPO3Fluid\Fluid\Core\Compiler\TemplateCompiler;
 use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\NodeInterface;
-use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\TextNode;
 use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\ViewHelperNode;
 use TYPO3Fluid\Fluid\Core\Rendering\RenderingContextInterface;
 use TYPO3Fluid\Fluid\Core\Variables\VariableProviderInterface;
@@ -39,8 +38,9 @@ abstract class AbstractViewHelper implements ViewHelperInterface
     private static array $argumentDefinitionCache = [];
 
     /**
-     * Current view helper node
-     * @var ViewHelperNode
+     * Current view helper node; null if template is cached
+     *
+     * @var ViewHelperNode|null
      */
     protected $viewHelperNode;
 
@@ -53,6 +53,7 @@ abstract class AbstractViewHelper implements ViewHelperInterface
     /**
      * @var NodeInterface[] array
      * @api
+     * @deprecated will be removed with Fluid v5. Use $viewHelperNode->getChildNodes() instead
      */
     protected $childNodes = [];
 
@@ -94,7 +95,7 @@ abstract class AbstractViewHelper implements ViewHelperInterface
      * Specifies whether the escaping interceptors should be disabled or enabled for the result of renderChildren() calls within this ViewHelper
      * @see isChildrenEscapingEnabled()
      *
-     * Note: If this is null, the value of $this->escapingInterceptorEnabled is considered for backwards compatibility.
+     * Note: If this is null, the value will be determined based on $escapeOutput.
      *
      * @var bool
      * @api
@@ -232,6 +233,7 @@ abstract class AbstractViewHelper implements ViewHelperInterface
      * framework. Populates $this->viewHelperNode.
      * @param NodeInterface[] $childNodes
      * @internal
+     * @deprecated will be removed with Fluid v5. Use $viewHelperNode->getChildNodes() instead
      */
     public function setChildNodes(array $childNodes)
     {
@@ -298,12 +300,14 @@ abstract class AbstractViewHelper implements ViewHelperInterface
             return fn() => $this->arguments[$contentArgumentName];
         }
         if ($this->renderChildrenClosure !== null) {
+            // @todo apply processing if contentArgumentName is set? Or implement sync from closure to argument?
             return $this->renderChildrenClosure;
         }
         return function () {
             $this->renderingContextStack[] = $this->renderingContext;
             $result = $this->viewHelperNode->evaluateChildNodes($this->renderingContext);
             $this->setRenderingContext(array_pop($this->renderingContextStack));
+            // @todo apply processing if contentArgumentName is set? Or implement sync from closure to argument?
             return $result;
         };
     }
@@ -332,20 +336,20 @@ abstract class AbstractViewHelper implements ViewHelperInterface
      */
     public function validateArguments()
     {
+        // @todo move to ViewHelperInvoker and make configurable with Fluid v5
+        $argumentProcessor = new LenientArgumentProcessor();
         $argumentDefinitions = $this->prepareArguments();
         foreach ($argumentDefinitions as $argumentName => $registeredArgument) {
+            // Note: This relies on the TemplateParser to check for missing required arguments
             if ($this->hasArgument($argumentName)) {
                 $value = $this->arguments[$argumentName];
-                $type = $registeredArgument->getType();
-                if ($value !== $registeredArgument->getDefaultValue() && $type !== 'mixed') {
+                if (!$argumentProcessor->isValid($value, $registeredArgument)) {
                     $givenType = is_object($value) ? get_class($value) : gettype($value);
-                    if (!$this->isValidType($type, $value)) {
-                        throw new \InvalidArgumentException(
-                            'The argument "' . $argumentName . '" was registered with type "' . $type . '", but is of type "' .
-                            $givenType . '" in view helper "' . get_class($this) . '".',
-                            1256475113,
-                        );
-                    }
+                    throw new \InvalidArgumentException(
+                        'The argument "' . $argumentName . '" was registered with type "' . $registeredArgument->getType() . '", but is of type "' .
+                        $givenType . '" in view helper "' . get_class($this) . '".',
+                        1256475113,
+                    );
                 }
             }
         }
@@ -357,9 +361,11 @@ abstract class AbstractViewHelper implements ViewHelperInterface
      * @param string $type
      * @param mixed $value
      * @return bool
+     * @deprecated Will be removed in v5. Use the new argument processing API to validate ViewHelper arguments.
      */
     protected function isValidType($type, $value)
     {
+        trigger_error('AbstractViewHelper::isValidType() has been deprecated and will be removed in Fluid v5.', E_USER_DEPRECATED);
         if ($type === 'object') {
             if (!is_object($value)) {
                 return false;
@@ -395,9 +401,11 @@ abstract class AbstractViewHelper implements ViewHelperInterface
      *
      * @param mixed $value
      * @return mixed
+     * @deprecated Will be removed in v5. Use the new argument processing API to validate ViewHelper arguments.
      */
     protected function getFirstElementOfNonEmpty($value)
     {
+        trigger_error('AbstractViewHelper::getFirstElementOfNonEmpty() has been deprecated and will be removed in Fluid v5.', E_USER_DEPRECATED);
         if (is_array($value)) {
             return reset($value);
         }
@@ -555,16 +563,6 @@ abstract class AbstractViewHelper implements ViewHelperInterface
 
         return $execution;
     }
-
-    /**
-     * Save the associated ViewHelper node in a static public class variable.
-     * called directly after the ViewHelper was built.
-     *
-     * @param ViewHelperNode $node
-     * @param array<string, TextNode> $arguments
-     * @param VariableProviderInterface $variableContainer
-     */
-    public static function postParseEvent(ViewHelperNode $node, array $arguments, VariableProviderInterface $variableContainer) {}
 
     /**
      * Resets the ViewHelper state.

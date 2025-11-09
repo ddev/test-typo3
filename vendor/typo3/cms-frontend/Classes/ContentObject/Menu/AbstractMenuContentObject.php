@@ -52,6 +52,21 @@ use TYPO3\CMS\Frontend\Typolink\UnableToLinkException;
  */
 abstract class AbstractMenuContentObject
 {
+    protected const customItemStates = [
+        // IFSUB is TRUE if there exist submenu items to the current item
+        'IFSUB',
+        'ACT',
+        // ACTIFSUB is TRUE if there exist submenu items to the current item and the current item is active
+        'ACTIFSUB',
+        // CUR is TRUE if the current page equals the item here!
+        'CUR',
+        // CURIFSUB is TRUE if there exist submenu items to the current item and the current page equals the item here!
+        'CURIFSUB',
+        'USR',
+        'SPC',
+        'USERDEF1',
+        'USERDEF2',
+    ];
     /**
      * tells you which menu number this is. This is important when getting data from the setup
      */
@@ -174,22 +189,6 @@ abstract class AbstractMenuContentObject
     protected $parentMenuArr;
 
     protected bool $disableGroupAccessCheck = false;
-
-    protected const customItemStates = [
-        // IFSUB is TRUE if there exist submenu items to the current item
-        'IFSUB',
-        'ACT',
-        // ACTIFSUB is TRUE if there exist submenu items to the current item and the current item is active
-        'ACTIFSUB',
-        // CUR is TRUE if the current page equals the item here!
-        'CUR',
-        // CURIFSUB is TRUE if there exist submenu items to the current item and the current page equals the item here!
-        'CURIFSUB',
-        'USR',
-        'SPC',
-        'USERDEF1',
-        'USERDEF2',
-    ];
 
     /**
      * The initialization of the object. This just sets some internal variables.
@@ -622,14 +621,8 @@ abstract class AbstractMenuContentObject
     {
         // clone global context object (singleton)
         $context = clone GeneralUtility::makeInstance(Context::class);
-        $context->setAspect(
-            'language',
-            $languageAspect ?? GeneralUtility::makeInstance(LanguageAspect::class)
-        );
-        return GeneralUtility::makeInstance(
-            PageRepository::class,
-            $context
-        );
+        $context->setAspect('language', $languageAspect ?? new LanguageAspect());
+        return GeneralUtility::makeInstance(PageRepository::class, $context);
     }
 
     /**
@@ -1059,7 +1052,7 @@ abstract class AbstractMenuContentObject
                     $recArr['next'] = $recArr['nextsection'];
                 }
             }
-            $items = explode('|', $this->conf['special.']['items']);
+            $items = explode('|', ($this->conf['special.']['items'] ?? 'index|up|next|prev'));
             $c = 0;
             foreach ($items as $v_b) {
                 $v_b = strtolower(trim($v_b));
@@ -1068,6 +1061,7 @@ abstract class AbstractMenuContentObject
                 }
                 if (is_array($recArr[$v_b] ?? false)) {
                     $menuItems[$c] = $recArr[$v_b];
+                    $menuItems[$c]['ITEM_STATE'] = $v_b;
                     if ($this->conf['special.'][$v_b . '.']['target'] ?? false) {
                         $menuItems[$c]['target'] = $this->conf['special.'][$v_b . '.']['target'];
                     }
@@ -1169,7 +1163,7 @@ abstract class AbstractMenuContentObject
                 if ($this->isItemState($state, $key)) {
                     // if this is the first element of type $state, we must generate the custom configuration.
                     if ($customConfiguration === null) {
-                        $customConfiguration = $typoScriptService->explodeConfigurationForOptionSplit((array)$this->mconf[$state . '.'], $splitCount);
+                        $customConfiguration = $typoScriptService->explodeConfigurationForOptionSplit((array)($this->mconf[$state . '.'] ?? []), $splitCount);
                     }
                     // Substitute normal with the custom (e.g. IFSUB)
                     if (isset($customConfiguration[$key])) {
@@ -1358,9 +1352,9 @@ abstract class AbstractMenuContentObject
             return true;
         }
         try {
-            $page = $this->sys_page->resolveShortcutPage($page, $this->disableGroupAccessCheck);
-            $shortcutPage = (int)($page['_SHORTCUT_ORIGINAL_PAGE_UID'] ?? 0);
-            if ($shortcutPage) {
+            $page = $this->sys_page->resolveShortcutPage($page, false, $this->disableGroupAccessCheck);
+            if (isset($page['_SHORTCUT_ORIGINAL_PAGE_UID'])) {
+                $shortcutPage = (int)($page['uid'] ?? 0);
                 if (in_array($shortcutPage, $this->alwaysActivePIDlist, true)) {
                     return true;
                 }
@@ -1391,8 +1385,8 @@ abstract class AbstractMenuContentObject
         }
         try {
             $page = $this->sys_page->resolveShortcutPage($page);
-            $shortcutPage = (int)($page['_SHORTCUT_ORIGINAL_PAGE_UID'] ?? 0);
-            if ($shortcutPage) {
+            if (isset($page['_SHORTCUT_ORIGINAL_PAGE_UID'])) {
+                $shortcutPage = (int)($page['uid'] ?? 0);
                 $testUid = $shortcutPage . ($MPvar ? ':' . $MPvar : '');
                 if (end($this->rL_uidRegister) === 'ITEM:' . $testUid) {
                     return true;
@@ -1432,7 +1426,7 @@ abstract class AbstractMenuContentObject
         $cacheIdentifierPagesNextLevel = 'menucontentobject-is-submenu-pages-next-level-' . $this->menuNumber . '-' . sha1(json_encode($pageIdsOnSameLevel));
         $cachePagesNextLevel = $runtimeCache->get($cacheIdentifierPagesNextLevel);
         if (!is_array($cachePagesNextLevel)) {
-            $cachePagesNextLevel = $this->sys_page->getMenu($pageIdsOnSameLevel, 'uid,pid,doktype,mount_pid,mount_pid_ol,nav_hide,shortcut,shortcut_mode,l18n_cfg');
+            $cachePagesNextLevel = $this->sys_page->getMenu($pageIdsOnSameLevel, 'uid,pid,doktype,mount_pid,mount_pid_ol,nav_hide,shortcut,shortcut_mode,l18n_cfg,sys_language_uid,l10n_parent,t3ver_wsid,t3ver_oid,t3ver_state', 'sorting', '', true, $this->disableGroupAccessCheck);
             $runtimeCache->set($cacheIdentifierPagesNextLevel, $cachePagesNextLevel);
         }
 
@@ -1734,20 +1728,20 @@ abstract class AbstractMenuContentObject
                     }
                 }
                 $uid = $row['uid'] ?? null;
-                $result[$uid] = $basePageRow;
-                $result[$uid]['title'] = $row['header'];
-                $result[$uid]['nav_title'] = $row['header'];
+                $result[$uid ?? ''] = $basePageRow;
+                $result[$uid ?? '']['title'] = $row['header'];
+                $result[$uid ?? '']['nav_title'] = $row['header'];
                 // Prevent false exclusion in filterMenuPages, thus: Always show tt_content records
-                $result[$uid]['nav_hide'] = 0;
-                $result[$uid]['subtitle'] = $row['subheader'] ?? '';
-                $result[$uid]['starttime'] = $row['starttime'] ?? '';
-                $result[$uid]['endtime'] = $row['endtime'] ?? '';
-                $result[$uid]['fe_group'] = $row['fe_group'] ?? '';
-                $result[$uid]['media'] = $row['media'] ?? '';
-                $result[$uid]['header_layout'] = $row['header_layout'] ?? '';
-                $result[$uid]['bodytext'] = $row['bodytext'] ?? '';
-                $result[$uid]['image'] = $row['image'] ?? '';
-                $result[$uid]['sectionIndex_uid'] = $uid;
+                $result[$uid ?? '']['nav_hide'] = 0;
+                $result[$uid ?? '']['subtitle'] = $row['subheader'] ?? '';
+                $result[$uid ?? '']['starttime'] = $row['starttime'] ?? '';
+                $result[$uid ?? '']['endtime'] = $row['endtime'] ?? '';
+                $result[$uid ?? '']['fe_group'] = $row['fe_group'] ?? '';
+                $result[$uid ?? '']['media'] = $row['media'] ?? '';
+                $result[$uid ?? '']['header_layout'] = $row['header_layout'] ?? '';
+                $result[$uid ?? '']['bodytext'] = $row['bodytext'] ?? '';
+                $result[$uid ?? '']['image'] = $row['image'] ?? '';
+                $result[$uid ?? '']['sectionIndex_uid'] = $uid;
             }
         }
 

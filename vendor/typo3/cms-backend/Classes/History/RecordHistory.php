@@ -356,25 +356,6 @@ class RecordHistory
     }
 
     /**
-     * Fetches the history entry for an ADD/creation action for a list of records
-     * @internal only to be used in TYPO3 Core
-     */
-    public function getCreationInformationForMultipleRecords(string $table, array $recordIds): array
-    {
-        $queryBuilder = $this->getQueryBuilder();
-        return $queryBuilder
-            ->select('*')
-            ->from('sys_history')
-            ->where(
-                $queryBuilder->expr()->eq('tablename', $queryBuilder->createNamedParameter($table)),
-                $queryBuilder->expr()->in('recuid', $queryBuilder->createNamedParameter($recordIds, Connection::PARAM_INT_ARRAY)),
-                $queryBuilder->expr()->eq('actiontype', $queryBuilder->createNamedParameter(RecordHistoryStore::ACTION_ADD, Connection::PARAM_INT))
-            )
-            ->executeQuery()
-            ->fetchAllAssociative();
-    }
-
-    /**
      * Queries the DB and prepares the results
      * Resolving a WSOL of the UID and checking permissions is explicitly not part of this method
      */
@@ -435,6 +416,9 @@ class RecordHistory
             }
             if ($actionType === RecordHistoryStore::ACTION_DELETE) {
                 $row['action'] = 'delete';
+            }
+            if ($actionType === RecordHistoryStore::ACTION_PUBLISH) {
+                $row['action'] = 'publish';
             }
             if ($row['history_data'] === null) {
                 $events[$identifier] = $row;

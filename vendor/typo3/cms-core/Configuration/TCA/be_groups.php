@@ -42,6 +42,9 @@ return [
                 'size' => 3,
                 'autoSizeMax' => 10,
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
         'file_mountpoints' => [
             'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:file_mountpoints',
@@ -74,6 +77,9 @@ return [
                     ],
                 ],
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
         'file_permissions' => [
             'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:be_groups.fileoper_perms',
@@ -104,6 +110,9 @@ return [
                 'maxitems' => 17,
                 'default' => 'readFolder,writeFolder,addFolder,renameFolder,moveFolder,deleteFolder,readFile,writeFile,addFile,renameFile,replaceFile,moveFile,copyFile,deleteFile',
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
         'workspace_perms' => [
             'displayCond' => 'USER:TYPO3\CMS\Core\Hooks\TcaDisplayConditions->isExtensionInstalled:workspaces',
@@ -117,6 +126,9 @@ return [
                     ['label' => 'LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:workspace_perms_live'],
                 ],
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
         'pagetypes_select' => [
             'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:be_groups.pagetypes_select',
@@ -126,6 +138,9 @@ return [
                 'itemsProcFunc' => \TYPO3\CMS\Core\Hooks\TcaItemsProcessorFunctions::class . '->populateAvailablePageTypes',
                 'size' => 5,
                 'autoSizeMax' => 50,
+            ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
             ],
         ],
         'tables_modify' => [
@@ -137,11 +152,17 @@ return [
                 'selectFieldName' => 'tables_select',
                 'itemsProcFunc' => \TYPO3\CMS\Core\Hooks\TcaItemsProcessorFunctions::class . '->populateAvailableTables',
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
         'tables_select' => [
             'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:be_groups.tables_select',
             'config' => [
                 'type' => 'passthrough',
+            ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
             ],
         ],
         'non_exclude_fields' => [
@@ -154,6 +175,9 @@ return [
                 'size' => 25,
                 'autoSizeMax' => 50,
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
         'explicit_allowdeny' => [
             'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:be_groups.explicit_allowdeny',
@@ -161,6 +185,9 @@ return [
                 'type' => 'select',
                 'renderType' => 'selectCheckBox',
                 'itemsProcFunc' => \TYPO3\CMS\Core\Hooks\TcaItemsProcessorFunctions::class . '->populateExplicitAuthValues',
+            ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
             ],
         ],
         'allowed_languages' => [
@@ -171,6 +198,9 @@ return [
                 'renderType' => 'selectCheckBox',
                 'itemsProcFunc' => \TYPO3\CMS\Core\Localization\TcaSystemLanguageCollector::class . '->populateAvailableSiteLanguages',
                 'dbFieldLength' => 255,
+            ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
             ],
         ],
         'custom_options' => [
@@ -190,6 +220,9 @@ return [
                 'size' => 5,
                 'autoSizeMax' => 50,
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
         'mfa_providers' => [
             'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:mfa_providers',
@@ -199,6 +232,9 @@ return [
                 'itemsProcFunc' => \TYPO3\CMS\Core\Authentication\Mfa\MfaProviderRegistry::class . '->allowedProvidersItemsProcFunc',
                 'size' => 5,
                 'autoSizeMax' => 50,
+            ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
             ],
         ],
         'TSconfig' => [
@@ -221,6 +257,9 @@ return [
                 'size' => 5,
                 'autoSizeMax' => 50,
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
         'category_perms' => [
             'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:category_perms',
@@ -234,6 +273,9 @@ return [
                     ],
                 ],
             ],
+            'authenticationContext' => [
+                'group' => 'be.userManagement',
+            ],
         ],
     ],
     'types' => [
@@ -243,9 +285,9 @@ return [
             --div--;LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:be_groups.tabs.record_permissions,
                 pagetypes_select, tables_modify, non_exclude_fields, explicit_allowdeny, allowed_languages,
             --div--;LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:be_groups.tabs.module_permissions,
-                groupMods, mfa_providers, custom_options,
+                groupMods, custom_options, mfa_providers, workspace_perms,
             --div--;LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:be_groups.tabs.mounts_and_workspaces,
-                workspace_perms, db_mountpoints, file_mountpoints, file_permissions, category_perms,
+                db_mountpoints, file_mountpoints, file_permissions, category_perms,
             --div--;LLL:EXT:core/Resources/Private/Language/locallang_tca.xlf:be_groups.tabs.options,
                 TSconfig,
             --div--;LLL:EXT:core/Resources/Private/Language/Form/locallang_tabs.xlf:access,

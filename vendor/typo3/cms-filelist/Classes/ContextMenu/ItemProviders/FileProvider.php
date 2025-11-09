@@ -54,6 +54,11 @@ class FileProvider extends AbstractProvider
             'iconIdentifier' => 'actions-open',
             'callbackAction' => 'editMetadata',
         ],
+        'replaceFile' => [
+            'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:cm.replace',
+            'iconIdentifier' => 'actions-edit-replace',
+            'callbackAction' => 'replaceFile',
+        ],
         'rename' => [
             'label' => 'LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:cm.rename',
             'iconIdentifier' => 'actions-edit-rename',
@@ -172,14 +177,14 @@ class FileProvider extends AbstractProvider
             case 'edit':
                 $canRender = $this->canBeEdited();
                 break;
+            case 'replaceFile':
+                $canRender = $this->canBeReplaced();
+                break;
             case 'editMetadata':
                 $canRender = $this->canEditMetadata();
                 break;
             case 'updateOnlineMedia':
                 $canRender = $this->isOnlineMedia() && $this->canEditMetadata();
-                break;
-            case 'info':
-                $canRender = $this->canShowInfo();
                 break;
 
                 // just for folders
@@ -196,6 +201,9 @@ class FileProvider extends AbstractProvider
                 break;
 
                 //for both files and folders
+            case 'info':
+                $canRender = $this->canShowInfo();
+                break;
             case 'rename':
                 $canRender = $this->canBeRenamed();
                 break;
@@ -222,6 +230,12 @@ class FileProvider extends AbstractProvider
                 break;
         }
         return $canRender;
+    }
+
+    protected function canBeReplaced(): bool
+    {
+        return $this->isFile()
+            && $this->record->checkActionPermission('replace');
     }
 
     protected function canBeEdited(): bool
@@ -253,7 +267,7 @@ class FileProvider extends AbstractProvider
 
     protected function canShowInfo(): bool
     {
-        return $this->isFile();
+        return $this->record !== null;
     }
 
     protected function canCreateNew(): bool
@@ -262,7 +276,7 @@ class FileProvider extends AbstractProvider
     }
 
     /**
-     * New filemounts can only be created for readable folders by admins
+     * New file mounts can only be created for readable folders by admins
      */
     protected function canCreateNewFilemount(): bool
     {
@@ -333,8 +347,8 @@ class FileProvider extends AbstractProvider
     }
 
     /**
-     * Checks if folder and record are in the same filemount
-     * Cannot copy folders between filemounts
+     * Checks if folder and record are in the same file mount
+     * Cannot copy folders between file mounts
      *
      * @param File|Folder|null $fileOrFolderInClipBoard
      */
@@ -488,6 +502,9 @@ class FileProvider extends AbstractProvider
                 break;
             case 'newFile':
                 $attributes['data-action-url'] = (string)$uriBuilder->buildUriFromRoute('file_create');
+                break;
+            case 'replaceFile':
+                $attributes['data-action-url'] = (string)$uriBuilder->buildUriFromRoute('file_replace');
                 break;
             case 'updateOnlineMedia':
                 $attributes['data-action-url'] = (string)$uriBuilder->buildUriFromRoute('file_update_online_media');

@@ -29,6 +29,7 @@ use TYPO3\CMS\Backend\Utility\BackendUtility;
 use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
 use TYPO3\CMS\Core\Cache\CacheManager;
 use TYPO3\CMS\Core\Cache\Frontend\FrontendInterface;
+use TYPO3\CMS\Core\Configuration\FlexForm\Exception\AbstractInvalidDataStructureException;
 use TYPO3\CMS\Core\Configuration\FlexForm\Exception\InvalidIdentifierException;
 use TYPO3\CMS\Core\Configuration\FlexForm\FlexFormTools;
 use TYPO3\CMS\Core\Configuration\Richtext;
@@ -41,7 +42,6 @@ use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Database\Query\QueryBuilder;
 use TYPO3\CMS\Core\Database\Query\QueryHelper;
 use TYPO3\CMS\Core\Database\Query\Restriction\DeletedRestriction;
-use TYPO3\CMS\Core\Database\Query\Restriction\QueryRestrictionContainerInterface;
 use TYPO3\CMS\Core\Database\Query\Restriction\WorkspaceRestriction;
 use TYPO3\CMS\Core\Database\RelationHandler;
 use TYPO3\CMS\Core\DataHandling\History\RecordHistoryStore;
@@ -102,6 +102,12 @@ use TYPO3\CMS\Core\Versioning\VersionState;
 class DataHandler
 {
     use LogDataTrait;
+
+    /**
+     * Prefix for the cache entries of nested element calls since the runtimeCache has a global scope.
+     */
+    protected const CACHE_IDENTIFIER_NESTED_ELEMENT_CALLS_PREFIX = 'core-datahandler-nestedElementCalls-';
+    protected const CACHE_IDENTIFIER_ELEMENTS_TO_BE_DELETED = 'core-datahandler-elementsToBeDeleted';
 
     // *********************
     // Public variables you can configure before using the class:
@@ -254,11 +260,6 @@ class DataHandler
     public array $copyMappingArray_merged = [];
 
     /**
-     * Per-table array with UIDs that have been deleted.
-     */
-    protected array $deletedRecords = [];
-
-    /**
      * Errors are collected in this variable.
      *
      * @internal should only be used from within TYPO3 Core
@@ -343,8 +344,6 @@ class DataHandler
      */
     protected array $historyRecords = [];
 
-    // Internal static:
-
     /**
      * The interval between sorting numbers used with tables with a 'sorting' field defined.
      *
@@ -354,30 +353,6 @@ class DataHandler
      */
     public int $sortIntervals = 256;
 
-    // Internal caching arrays
-    /**
-     * User by function checkRecordInsertAccess() to store whether a record can be inserted on a page id
-     */
-    protected array $recInsertAccessCache = [];
-
-    /**
-     * Caching array for check of whether records are in a webmount
-     */
-    protected array $isRecordInWebMount_Cache = [];
-
-    /**
-     * Caching array for page ids in webmounts
-     */
-    protected array $isInWebMount_Cache = [];
-
-    /**
-     * Used for caching page records in pageInfo()
-     *
-     * @var array<int, array<string, int|string|null>>
-     */
-    protected array $pageCache = [];
-
-    // Other arrays:
     /**
      * For accumulation of MM relations that must be written after new records are created.
      *
@@ -452,13 +427,6 @@ class DataHandler
     public $checkValue_currentRecord = [];
 
     /**
-     * Disable delete clause
-     */
-    protected bool $disableDeleteClause = false;
-
-    protected ?array $checkModifyAccessListHookObjects = null;
-
-    /**
      * The outermost instance of \TYPO3\CMS\Core\DataHandling\DataHandler:
      * This object instantiates itself on versioning and localization ...
      */
@@ -474,12 +442,6 @@ class DataHandler
      * to retrieve the parent folder/page at a later stage
      */
     protected static array $recordPidsForDeletedRecords = [];
-
-    /**
-     * Prefix for the cache entries of nested element calls since the runtimeCache has a global scope.
-     */
-    protected const CACHE_IDENTIFIER_NESTED_ELEMENT_CALLS_PREFIX = 'core-datahandler-nestedElementCalls-';
-    protected const CACHE_IDENTIFIER_ELEMENTS_TO_BE_DELETED = 'core-datahandler-elementsToBeDeleted';
 
     public function __construct(
         private readonly EventDispatcherInterface $eventDispatcher,
@@ -650,11 +612,6 @@ class DataHandler
         return $cleanFieldArray;
     }
 
-    /*********************************************
-     *
-     * HOOKS
-     *
-     *********************************************/
     /**
      * Hook: processDatamap_afterDatabaseOperations
      * (calls $hookObj->processDatamap_afterDatabaseOperations($status, $table, $id, $fieldArray, $this);)
@@ -669,9 +626,8 @@ class DataHandler
      * @param array $fieldArray (reference) The field array of a record
      * @internal should only be used from within DataHandler
      */
-    public function hook_processDatamap_afterDatabaseOperations(&$hookObjectsArr, &$status, &$table, &$id, &$fieldArray): void
+    public function hook_processDatamap_afterDatabaseOperations($hookObjectsArr, $status, &$table, &$id, &$fieldArray): void
     {
-        // Process hook directly:
         if (!isset($this->remapStackRecords[$table][$id])) {
             foreach ($hookObjectsArr as $hookObj) {
                 if (method_exists($hookObj, 'processDatamap_afterDatabaseOperations')) {
@@ -688,54 +644,24 @@ class DataHandler
     }
 
     /**
-     * Gets the 'checkModifyAccessList' hook objects.
-     * The first call initializes the accordant objects.
-     *
-     * @return array The 'checkModifyAccessList' hook objects (if any)
-     * @throws \UnexpectedValueException
-     */
-    protected function getCheckModifyAccessListHookObjects(): array
-    {
-        if ($this->checkModifyAccessListHookObjects === null) {
-            $this->checkModifyAccessListHookObjects = [];
-            foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['checkModifyAccessList'] ?? [] as $className) {
-                $hookObject = GeneralUtility::makeInstance($className);
-                if (!$hookObject instanceof DataHandlerCheckModifyAccessListHookInterface) {
-                    throw new \UnexpectedValueException($className . ' must implement interface ' . DataHandlerCheckModifyAccessListHookInterface::class, 1251892472);
-                }
-                $this->checkModifyAccessListHookObjects[] = $hookObject;
-            }
-        }
-        return $this->checkModifyAccessListHookObjects;
-    }
-
-    /*********************************************
-     *
-     * PROCESSING DATA
-     *
-     *********************************************/
-    /**
      * Processing the data-array
      * Call this function to process the data-array set by start()
-     *
-     * @return bool|void
      */
-    public function process_datamap()
+    public function process_datamap(): void
     {
         $this->controlActiveElements();
-
-        // Keep versionized(!) relations here locally:
-        $registerDBList = [];
         $this->registerElementsToBeDeleted();
         $this->datamap = $this->unsetElementsToBeDeleted($this->datamap);
-        // Editing frozen:
+
         if ($this->BE_USER->workspace !== 0 && ($this->BE_USER->workspaceRec['freeze'] ?? false)) {
-            $this->log('sys_workspace', $this->BE_USER->workspace, SystemLogDatabaseAction::VERSIONIZE, 0, SystemLogErrorClassification::USER_ERROR, 'All editing in this workspace has been frozen');
-            return false;
+            // Workspace is frozen
+            $this->log('sys_workspace', $this->BE_USER->workspace, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'All editing in this workspace has been frozen');
+            return;
         }
-        // First prepare user defined objects (if any) for hooks which extend this function:
+
         $hookObjectsArr = [];
         foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['processDatamapClass'] ?? [] as $className) {
+            // Instantiate hooks and call first hook method
             $hookObject = GeneralUtility::makeInstance($className);
             if (method_exists($hookObject, 'processDatamap_beforeStart')) {
                 $hookObject->processDatamap_beforeStart($this);
@@ -747,70 +673,62 @@ class DataHandler
             foreach ($tableDataMap as $identifier => $fieldValues) {
                 if (!MathUtility::canBeInterpretedAsInteger($identifier)) {
                     $this->datamap[$tableName][$identifier] = $this->initializeSlugFieldsToEmptyString($tableName, $fieldValues);
+                    $this->datamap[$tableName][$identifier] = $this->initializeUuidFieldsToEmptyString($tableName, $fieldValues);
                 }
             }
         }
 
         $this->datamap = DataMapProcessor::instance($this->datamap, $this->BE_USER, $this->referenceIndexUpdater)->process();
-        // Organize tables so that the pages-table is always processed first. This is required if you want to make sure that content pointing to a new page will be created.
+        $registerDBList = [];
         $orderOfTables = [];
-        // Set pages first.
         if (isset($this->datamap['pages'])) {
+            // Handling pages table is always the first task to make sure they are done if other records are added to them.
             $orderOfTables[] = 'pages';
         }
         $orderOfTables = array_unique(array_merge($orderOfTables, array_keys($this->datamap)));
-        // Process the tables...
         foreach ($orderOfTables as $table) {
-            // Check if
-            //	   - table is set in $GLOBALS['TCA'],
-            //	   - table is NOT readOnly
-            //	   - the table is set with content in the data-array (if not, there's nothing to process...)
-            //	   - permissions for tableaccess OK
-            $modifyAccessList = $this->checkModifyAccessList($table);
-            if (!$modifyAccessList) {
-                $this->log($table, 0, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to modify table "{table}" without permission', 1, ['table' => $table]);
+            if (!$this->checkModifyAccessList($table)) {
+                // User is not allowed to modify
+                $this->log($table, 0, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to modify table "{table}" without permission', null, ['table' => $table]);
+                continue;
             }
             if (!$this->tcaSchemaFactory->has($table)) {
+                // Table not set in TCA
                 continue;
             }
             $schema = $this->tcaSchemaFactory->get($table);
-            if ($schema->hasCapability(TcaSchemaCapability::AccessReadOnly) || !is_array($this->datamap[$table]) || !$modifyAccessList) {
+            if ($schema->hasCapability(TcaSchemaCapability::AccessReadOnly)) {
+                // Table is readonly
                 continue;
             }
 
             if ($this->reverseOrder) {
                 $this->datamap[$table] = array_reverse($this->datamap[$table], true);
             }
-            // For each record from the table, do:
-            // $id is the record uid, may be a string if new records...
-            // $incomingFieldArray is the array of fields
+
             foreach ($this->datamap[$table] as $id => $incomingFieldArray) {
                 if (!is_array($incomingFieldArray)) {
                     continue;
                 }
-                $theRealPid = null;
-
-                // Hook: processDatamap_preProcessFieldArray
                 foreach ($hookObjectsArr as $hookObj) {
                     if (method_exists($hookObj, 'processDatamap_preProcessFieldArray')) {
                         $hookObj->processDatamap_preProcessFieldArray($incomingFieldArray, $table, $id, $this);
-                        // in case hook invalidated `$incomingFieldArray`, skip the record completely
+                        // If a hook invalidated $incomingFieldArray, skip the record completely
                         if (!is_array($incomingFieldArray)) {
                             continue 2;
                         }
                     }
                 }
-                // ******************************
-                // Checking access to the record
-                // ******************************
+
+                $theRealPid = null;
                 $createNewVersion = false;
                 $old_pid_value = '';
-                // Is it a new record? (Then Id is a string)
                 if (!MathUtility::canBeInterpretedAsInteger($id)) {
+                    // $id is not an integer. We're creating a new record.
                     // Get a fieldArray with tca default values
                     $fieldArray = $this->newFieldArray($table);
-                    // A pid must be set for new records.
                     if (isset($incomingFieldArray['pid'])) {
+                        // A pid must be set for new records.
                         $pid_value = $incomingFieldArray['pid'];
                         // Checking and finding numerical pid, it may be a string-reference to another value
                         $canProceed = true;
@@ -852,234 +770,204 @@ class DataHandler
                         && $languageField && isset($incomingFieldArray[$languageField]) && $incomingFieldArray[$languageField] > 0
                         && $transOrigPointerField && isset($incomingFieldArray[$transOrigPointerField]) && $incomingFieldArray[$transOrigPointerField] > 0
                     ) {
-                        $recordAccess = $this->checkRecordInsertAccess($table, $incomingFieldArray[$transOrigPointerField]);
+                        $pageRecord = BackendUtility::getRecord('pages', $incomingFieldArray[$transOrigPointerField]) ?? [];
+                        if (!$this->hasPermissionToInsert($table, $incomingFieldArray[$transOrigPointerField], $pageRecord, (int)$incomingFieldArray[$languageField])) {
+                            $this->log($table, $incomingFieldArray[$transOrigPointerField], SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert record on pages:{pid} where table "{table}" is not allowed', null, ['pid' => $incomingFieldArray[$transOrigPointerField], 'table' => $table], $incomingFieldArray[$transOrigPointerField]);
+                            continue;
+                        }
                     } else {
-                        $recordAccess = $this->checkRecordInsertAccess($table, $theRealPid);
-                    }
-                    if ($recordAccess) {
-                        $incomingFieldArray = $this->addDefaultPermittedLanguageIfNotSet($table, $incomingFieldArray, $theRealPid);
-                        $recordAccess = $this->BE_USER->recordEditAccessInternals($table, $incomingFieldArray, true);
-                        if (!$recordAccess) {
-                            $this->log($table, 0, SystemLogDatabaseAction::INSERT, 0, SystemLogErrorClassification::USER_ERROR, 'recordEditAccessInternals() check failed [{reason}]', -1, ['reason' => $this->BE_USER->errorMsg]);
-                        } elseif (!$this->bypassWorkspaceRestrictions && !$this->BE_USER->workspaceAllowsLiveEditingInTable($table)) {
-                            // If LIVE records cannot be created due to workspace restrictions, prepare creation of placeholder-record
-                            // So, if no live records were allowed in the current workspace, we have to create a new version of this record
-                            if ($schema->isWorkspaceAware()) {
-                                $createNewVersion = true;
-                            } else {
-                                $recordAccess = false;
-                                $this->log(
-                                    $table,
-                                    0,
-                                    SystemLogDatabaseAction::VERSIONIZE,
-                                    0,
-                                    SystemLogErrorClassification::USER_ERROR,
-                                    'Attempt to insert version record "{table}:{uid}" to this workspace failed. "Live" edit permissions of records from tables without versioning required',
-                                    -1,
-                                    [
-                                        'table' => $table,
-                                        'uid' => $id,
-                                    ]
-                                );
-                            }
+                        $pageRecord = BackendUtility::getRecord('pages', $theRealPid) ?? [];
+                        if (!$this->hasPermissionToInsert($table, $theRealPid, $pageRecord)) {
+                            $this->log($table, $theRealPid, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert record on pages:{pid} where table "{table}" is not allowed', null, ['pid' => $theRealPid, 'table' => $table], $theRealPid);
+                            continue;
                         }
                     }
-                    // Yes new record, change $record_status to 'insert'
-                    $status = 'new';
-                } else {
-                    // Nope... $id is a number
-                    $id = (int)$id;
-                    $fieldArray = [];
-
-                    $recordAccess = null;
-                    if (is_array($hookObjectsArr)) {
-                        foreach ($hookObjectsArr as $hookObj) {
-                            if (method_exists($hookObj, 'checkRecordUpdateAccess')) {
-                                $recordAccess = $hookObj->checkRecordUpdateAccess($table, $id, $incomingFieldArray, $recordAccess, $this);
-                            }
-                        }
-                    }
-                    if ($recordAccess !== null) {
-                        $recordAccess = (bool)$recordAccess;
-                    } else {
-                        $recordAccess = $this->checkRecordUpdateAccess($table, $id);
-                    }
-                    if (!$recordAccess) {
-                        if ($this->enableLogging) {
-                            $propArr = $this->getRecordProperties($table, $id);
-                            $this->log($table, $id, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to modify record "{title}" ({table}:{uid}) without permission or non-existing page', 2, ['title' => $propArr['header'], 'table' => $table, 'uid' => $id], $propArr['event_pid']);
-                        }
+                    $incomingFieldArray = $this->addDefaultPermittedLanguageIfNotSet($table, $incomingFieldArray, $theRealPid);
+                    if (!$this->BE_USER->recordEditAccessInternals($table, $incomingFieldArray, true)) {
+                        $this->log($table, 0, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'recordEditAccessInternals() check failed [{reason}]', null, ['reason' => $this->BE_USER->errorMsg]);
                         continue;
                     }
-
-                    // Next check of the record permissions (internals)
-                    $recordAccess = $this->BE_USER->recordEditAccessInternals($table, $id);
-                    if (!$recordAccess) {
-                        $this->log($table, $id, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::USER_ERROR, 'recordEditAccessInternals() check failed [{reason}]', -1, ['reason' => $this->BE_USER->errorMsg]);
-                    } else {
-                        // Here we fetch the PID of the record that we point to...
-                        $tempdata = $this->recordInfo($table, $id);
-                        $theRealPid = $tempdata['pid'] ?? null;
-                        // Use the new id of the versionized record we're trying to write to:
-                        // (This record is a child record of a parent and has already been versionized.)
-                        if (!empty($this->autoVersionIdMap[$table][$id])) {
-                            // For the reason that creating a new version of this record, automatically
-                            // created related child records (e.g. "IRRE"), update the accordant field:
-                            $this->getVersionizedIncomingFieldArray($table, $id, $incomingFieldArray, $registerDBList);
-                            // Use the new id of the copied/versionized record:
-                            $id = $this->autoVersionIdMap[$table][$id];
-                            $recordAccess = true;
-                        } elseif (!$this->bypassWorkspaceRestrictions && $tempdata && ($errorCode = $this->workspaceCannotEditRecord($table, $tempdata))) {
-                            $recordAccess = false;
-                            // Versioning is required and it must be offline version!
-                            // Check if there already is a workspace version
-                            $workspaceVersion = BackendUtility::getWorkspaceVersionOfRecord($this->BE_USER->workspace, $table, $id, 'uid,t3ver_oid');
-                            if ($workspaceVersion) {
-                                $id = $workspaceVersion['uid'];
-                                $recordAccess = true;
-                            } elseif ($this->workspaceAllowAutoCreation($table, $id, $theRealPid)) {
-                                // new version of a record created in a workspace - so always refresh pagetree to indicate there is a change in the workspace
-                                $this->pagetreeNeedsRefresh = true;
-
-                                $tce = GeneralUtility::makeInstance(self::class);
-                                $tce->enableLogging = $this->enableLogging;
-                                // Setting up command for creating a new version of the record:
-                                $cmd = [];
-                                $cmd[$table][$id]['version'] = [
-                                    'action' => 'new',
-                                    // Default is to create a version of the individual records
-                                    'label' => 'Auto-created for WS #' . $this->BE_USER->workspace,
-                                ];
-                                $tce->start([], $cmd, $this->BE_USER, $this->referenceIndexUpdater);
-                                $tce->process_cmdmap();
-                                $this->errorLog = array_merge($this->errorLog, $tce->errorLog);
-                                // If copying was successful, share the new uids (also of related children):
-                                if (!empty($tce->copyMappingArray[$table][$id])) {
-                                    foreach ($tce->copyMappingArray as $origTable => $origIdArray) {
-                                        foreach ($origIdArray as $origId => $newId) {
-                                            $this->autoVersionIdMap[$origTable][$origId] = $newId;
-                                        }
-                                    }
-                                    // Update registerDBList, that holds the copied relations to child records:
-                                    $registerDBList = array_merge($registerDBList, $tce->registerDBList);
-                                    // For the reason that creating a new version of this record, automatically
-                                    // created related child records (e.g. "IRRE"), update the accordant field:
-                                    $this->getVersionizedIncomingFieldArray($table, $id, $incomingFieldArray, $registerDBList);
-                                    // Use the new id of the copied/versionized record:
-                                    $id = $this->autoVersionIdMap[$table][$id];
-                                    $recordAccess = true;
-                                } else {
-                                    $this->log(
-                                        $table,
-                                        $id,
-                                        SystemLogDatabaseAction::VERSIONIZE,
-                                        0,
-                                        SystemLogErrorClassification::USER_ERROR,
-                                        'Attempt to version record "{table}:{uid}" failed [{reason}]',
-                                        -1,
-                                        [
-                                            'reason' => $errorCode,
-                                            'table' => $table,
-                                            'uid' => $id,
-                                        ]
-                                    );
-                                }
-                            } else {
-                                $this->log(
-                                    $table,
-                                    $id,
-                                    SystemLogDatabaseAction::VERSIONIZE,
-                                    0,
-                                    SystemLogErrorClassification::USER_ERROR,
-                                    'Attempt to version record "{table}:{uid}" failed [{reason}]. "Live" edit permissions of records from tables without versioning required',
-                                    -1,
-                                    [
-                                        'reason' => $errorCode,
-                                        'table' => $table,
-                                        'uid' => $id,
-                                    ]
-                                );
-                            }
+                    if (!$this->bypassWorkspaceRestrictions && !$this->BE_USER->workspaceAllowsLiveEditingInTable($table)) {
+                        // If LIVE records cannot be created due to workspace restrictions, prepare creation of placeholder-record
+                        // So, if no live records were allowed in the current workspace, we have to create a new version of this record
+                        if ($schema->isWorkspaceAware()) {
+                            $createNewVersion = true;
+                        } else {
+                            $this->log($table, 0, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert version record "{table}:{uid}" to this workspace failed. "Live" edit permissions of records from tables without versioning required', null, ['table' => $table, 'uid' => $id]);
+                            continue;
                         }
                     }
-                    // The default is 'update'
-                    $status = 'update';
-                }
-                // If access was granted above, proceed to create or update record:
-                if (!$recordAccess) {
-                    continue;
-                }
-
-                // Here the "pid" is set IF NOT the old pid was a string pointing to a place in the subst-id array.
-                [$tscPID] = BackendUtility::getTSCpid($table, $id, $old_pid_value ?: ($fieldArray['pid'] ?? 0));
-                if ($status === 'new') {
-                    // Apply TCAdefaults from pageTS
+                    // Here the "pid" is set IF NOT the old pid was a string pointing to a place in the subst-id array.
+                    [$tscPID] = BackendUtility::getTSCpid($table, $id, $old_pid_value ?: ($fieldArray['pid'] ?? 0));
+                    // Apply TCA defaults from pageTS
                     $fieldArray = $this->applyDefaultsForFieldArray($table, (int)$tscPID, $fieldArray);
                     // Apply page permissions as well
                     if ($table === 'pages') {
                         $fieldArray = $this->pagePermissionAssembler->applyDefaults(
                             $fieldArray,
                             (int)$tscPID,
-                            (int)$this->userid,
+                            $this->userid,
                             (int)$this->BE_USER->firstMainGroup
                         );
                     }
                     // Ensure that the default values, that are stored in the $fieldArray (built from internal default values)
                     // Are also placed inside the incomingFieldArray, so this is checked in "fillInFieldArray" and
                     // all default values are also checked for validity
-                    // This allows to set TCAdefaults (for example) without having to use FormEngine to have the fields available first.
+                    // This allows to set TCA defaults (for example) without having to use FormEngine to have the fields available first.
                     $incomingFieldArray = array_replace_recursive($fieldArray, $incomingFieldArray);
-                }
-                // Processing of all fields in incomingFieldArray and setting them in $fieldArray
-                $fieldArray = $this->fillInFieldArray($table, $id, $fieldArray, $incomingFieldArray, $theRealPid, $status, $tscPID);
-                // Setting system fields
-                if ($status === 'new') {
+                    // Processing of all fields in incomingFieldArray and setting them in $fieldArray
+                    $fieldArray = $this->fillInFieldArray($table, $id, $fieldArray, $incomingFieldArray, $theRealPid, 'new', $tscPID);
+                    // Setting system fields
                     if ($schema->hasCapability(TcaSchemaCapability::CreatedAt)) {
                         $fieldArray[$schema->getCapability(TcaSchemaCapability::CreatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
                     }
-                }
-                // Set stage to "Editing" to make sure we restart the workflow
-                if ($schema->isWorkspaceAware()) {
-                    $fieldArray['t3ver_stage'] = 0;
-                }
-                if ($status !== 'new') {
-                    // Removing fields which are equal to the current value:
-                    $fieldArray = $this->compareFieldArrayWithCurrentAndUnset($table, $id, $fieldArray);
-                }
-                if ($schema->hasCapability(TcaSchemaCapability::UpdatedAt) && !empty($fieldArray)) {
-                    $fieldArray[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
-                }
-                // Hook: processDatamap_postProcessFieldArray
-                foreach ($hookObjectsArr as $hookObj) {
-                    if (method_exists($hookObj, 'processDatamap_postProcessFieldArray')) {
-                        $hookObj->processDatamap_postProcessFieldArray($status, $table, $id, $fieldArray, $this);
+                    // Set stage to "Editing" to make sure we restart the workflow
+                    if ($schema->isWorkspaceAware()) {
+                        $fieldArray['t3ver_stage'] = 0;
                     }
-                }
-                // Performing insert/update. If fieldArray has been unset by some userfunction (see hook above), don't do anything
-                // Kasper: Unsetting the fieldArray is dangerous; MM relations might be saved already
-                if (is_array($fieldArray)) {
-                    if ($status === 'new') {
+                    if ($schema->hasCapability(TcaSchemaCapability::UpdatedAt) && !empty($fieldArray)) {
+                        $fieldArray[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
+                    }
+                    foreach ($hookObjectsArr as $hookObj) {
+                        if (method_exists($hookObj, 'processDatamap_postProcessFieldArray')) {
+                            $hookObj->processDatamap_postProcessFieldArray('new', $table, $id, $fieldArray, $this);
+                        }
+                    }
+                    // Performing insert/update. If fieldArray has been unset by some userfunction (see hook above), don't do anything
+                    // Kasper: Unsetting the fieldArray is dangerous; MM relations might be saved already
+                    if (is_array($fieldArray)) {
                         if ($table === 'pages') {
                             // for new pages always a refresh is needed
                             $this->pagetreeNeedsRefresh = true;
                         }
-
                         // This creates a version of the record, instead of adding it to the live workspace
                         if ($createNewVersion) {
-                            // new record created in a workspace - so always refresh pagetree to indicate there is a change in the workspace
+                            // new record created in a workspace - so always refresh page tree to indicate there is a change in the workspace
                             $this->pagetreeNeedsRefresh = true;
                             $fieldArray['pid'] = $theRealPid;
                             $fieldArray['t3ver_oid'] = 0;
                             // Setting state for version (so it can know it is currently a new version...)
                             $fieldArray['t3ver_state'] = VersionState::NEW_PLACEHOLDER->value;
                             $fieldArray['t3ver_wsid'] = $this->BE_USER->workspace;
-                            $this->insertDB($table, $id, $fieldArray, true, (int)($incomingFieldArray['uid'] ?? 0));
-                            // Hold auto-versionized ids of placeholders
+                            $this->insertDB($table, $id, $fieldArray, null, (int)($incomingFieldArray['uid'] ?? 0));
+                            // Hold auto-versioned ids of placeholders
                             $this->autoVersionIdMap[$table][$this->substNEWwithIDs[$id]] = $this->substNEWwithIDs[$id];
                         } else {
-                            $this->insertDB($table, $id, $fieldArray, false, (int)($incomingFieldArray['uid'] ?? 0));
+                            $this->insertDB($table, $id, $fieldArray, null, (int)($incomingFieldArray['uid'] ?? 0));
                         }
-                    } else {
+                    }
+                    // Note: When using the hook after INSERT operations, you will only get the temporary NEW... id passed to your hook as $id,
+                    // but you can easily translate it to the real uid of the inserted record using the $this->substNEWwithIDs array.
+                    $this->hook_processDatamap_afterDatabaseOperations($hookObjectsArr, 'new', $table, $id, $fieldArray);
+                } else {
+                    // $id is an integer. We're updating an existing record or creating a workspace version.
+                    $id = (int)$id;
+                    $fieldArray = [];
+                    $recordAccess = null;
+                    $currentRecord = BackendUtility::getRecord($table, $id, '*', '', false);
+                    if (empty($currentRecord) || ($currentRecord['pid'] ?? null) === null) {
+                        // Skip if there is no record. Skip if record has no pid column indicating incomplete DB.
+                        continue;
+                    }
+                    $pageRecord = [];
+                    if ($table === 'pages') {
+                        $pageRecord = $currentRecord;
+                    } elseif ((int)$currentRecord['pid'] > 0) {
+                        $pageRecord = BackendUtility::getRecord('pages', $currentRecord['pid']) ?? [];
+                    }
+                    foreach ($hookObjectsArr as $hookObj) {
+                        if (method_exists($hookObj, 'checkRecordUpdateAccess')) {
+                            $recordAccess = $hookObj->checkRecordUpdateAccess($table, $id, $incomingFieldArray, $recordAccess, $this);
+                        }
+                    }
+                    if ($recordAccess !== null) {
+                        if (!$recordAccess) {
+                            $this->log($table, $id, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to modify record {table}:{uid} denied by checkRecordUpdateAccess hook', null, ['table' => $table, 'uid' => $id], (int)$currentRecord['pid']);
+                            continue;
+                        }
+                    } elseif ($pageRecord === [] && $currentRecord['pid'] === 0 && !($this->admin || BackendUtility::isRootLevelRestrictionIgnored($table))
+                        || (($pageRecord !== [] || $currentRecord['pid'] !== 0) && !$this->hasPermissionToUpdate($table, $pageRecord))
+                    ) {
+                        $this->log($table, $id, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to modify record {table}:{uid} without permission or non-existing page', null, ['table' => $table, 'uid' => $id], (int)$currentRecord['pid']);
+                        continue;
+                    }
+                    if (!$this->BE_USER->recordEditAccessInternals($table, $currentRecord)) {
+                        $this->log($table, $id, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to modify record {table}:{uid} failed with: {reason}', null, ['table' => $table, 'uid' => $id, 'reason' => $this->BE_USER->errorMsg]);
+                        continue;
+                    }
+                    // Use the new id of the versioned record we're trying to write to.
+                    // This record is a child record of a parent and has already been versioned.
+                    if (!empty($this->autoVersionIdMap[$table][$id])) {
+                        // For the reason that creating a new version of this record, automatically
+                        // created related child records (e.g. "IRRE"), update the accordant field:
+                        $this->getVersionizedIncomingFieldArray($table, $id, $incomingFieldArray, $registerDBList);
+                        // Use the new id of the copied/versioned record:
+                        $id = $this->autoVersionIdMap[$table][$id];
+                    } elseif (!$this->bypassWorkspaceRestrictions && ($errorCode = $this->workspaceCannotEditRecord($table, $currentRecord))) {
+                        // Versioning is required and it must be offline version!
+                        // Check if there already is a workspace version
+                        $workspaceVersion = BackendUtility::getWorkspaceVersionOfRecord($this->BE_USER->workspace, $table, $id, 'uid,t3ver_oid');
+                        if ($workspaceVersion) {
+                            $id = $workspaceVersion['uid'];
+                        } elseif ($this->workspaceAllowAutoCreation($table, $id, (int)$currentRecord['pid'])) {
+                            // new version of a record created in a workspace - so always refresh page tree to indicate there is a change in the workspace
+                            $this->pagetreeNeedsRefresh = true;
+                            /** @var DataHandler $tce */
+                            $tce = GeneralUtility::makeInstance(self::class);
+                            $tce->enableLogging = $this->enableLogging;
+                            // Setting up command for creating a new version of the record:
+                            $cmd = [];
+                            $cmd[$table][$id]['version'] = [
+                                'action' => 'new',
+                                // Default is to create a version of the individual records
+                                'label' => 'Auto-created for WS #' . $this->BE_USER->workspace,
+                            ];
+                            $tce->start([], $cmd, $this->BE_USER, $this->referenceIndexUpdater);
+                            $tce->process_cmdmap();
+                            $this->errorLog = array_merge($this->errorLog, $tce->errorLog);
+                            // If copying was successful, share the new uids (also of related children):
+                            if (empty($tce->copyMappingArray[$table][$id])) {
+                                $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to version record "{table}:{uid}" failed [{reason}]', null, ['reason' => $errorCode, 'table' => $table, 'uid' => $id]);
+                                continue;
+                            }
+                            foreach ($tce->copyMappingArray as $origTable => $origIdArray) {
+                                foreach ($origIdArray as $origId => $newId) {
+                                    $this->autoVersionIdMap[$origTable][$origId] = $newId;
+                                }
+                            }
+                            // Update registerDBList, that holds the copied relations to child records:
+                            $registerDBList = array_merge($registerDBList, $tce->registerDBList);
+                            // For the reason that creating a new version of this record, automatically
+                            // created related child records (e.g. "IRRE"), update the accordant field:
+                            $this->getVersionizedIncomingFieldArray($table, $id, $incomingFieldArray, $registerDBList);
+                            // Use the new id of the copied/versioned record:
+                            $id = $this->autoVersionIdMap[$table][$id];
+                        } else {
+                            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to version record "{table}:{uid}" failed [{reason}]. "Live" edit permissions of records from tables without versioning required', null, ['reason' => $errorCode, 'table' => $table, 'uid' => $id]);
+                            continue;
+                        }
+                    }
+                    // Here the "pid" is set IF NOT the old pid was a string pointing to a place in the subst-id array.
+                    [$tscPID] = BackendUtility::getTSCpid($table, $id, 0);
+                    // Processing of all fields in incomingFieldArray and setting them in $fieldArray
+                    $fieldArray = $this->fillInFieldArray($table, $id, $fieldArray, $incomingFieldArray, (int)$currentRecord['pid'], 'update', $tscPID);
+                    // Set stage to "Editing" to make sure we restart the workflow
+                    if ($schema->isWorkspaceAware()) {
+                        $fieldArray['t3ver_stage'] = 0;
+                    }
+                    // Removing fields which are equal to the current value:
+                    $fieldArray = $this->compareFieldArrayWithCurrentAndUnset($table, $id, $fieldArray);
+                    if ($schema->hasCapability(TcaSchemaCapability::UpdatedAt) && !empty($fieldArray)) {
+                        $fieldArray[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
+                    }
+                    foreach ($hookObjectsArr as $hookObj) {
+                        if (method_exists($hookObj, 'processDatamap_postProcessFieldArray')) {
+                            $hookObj->processDatamap_postProcessFieldArray('update', $table, $id, $fieldArray, $this);
+                        }
+                    }
+                    // Performing insert/update. If fieldArray has been unset by some userfunction (see hook above), don't do anything
+                    // Kasper: Unsetting the fieldArray is dangerous; MM relations might be saved already
+                    if (!empty($fieldArray)) {
                         if ($table === 'pages') {
                             // Only a certain number of fields needs to be checked for updates,
                             // fields with unchanged values are already removed here.
@@ -1088,22 +976,22 @@ class DataHandler
                                 $this->pagetreeNeedsRefresh = true;
                             }
                         }
-                        $this->updateDB($table, $id, $fieldArray);
+                        $this->updateDB($table, $id, $fieldArray, (int)$currentRecord['pid']);
                     }
+                    // Note: When using the hook after INSERT operations, you will only get the temporary NEW... id passed to your hook as $id,
+                    // but you can easily translate it to the real uid of the inserted record using the $this->substNEWwithIDs array.
+                    $this->hook_processDatamap_afterDatabaseOperations($hookObjectsArr, 'update', $table, $id, $fieldArray);
                 }
-                // Hook: processDatamap_afterDatabaseOperations
-                // Note: When using the hook after INSERT operations, you will only get the temporary NEW... id passed to your hook as $id,
-                // but you can easily translate it to the real uid of the inserted record using the $this->substNEWwithIDs array.
-                $this->hook_processDatamap_afterDatabaseOperations($hookObjectsArr, $status, $table, $id, $fieldArray);
             }
         }
+
         // Process the stack of relations to remap/correct
         $this->processRemapStack();
         $this->dbAnalysisStoreExec();
-        // Hook: processDatamap_afterAllOperations
-        // Note: When this hook gets called, all operations on the submitted data have been finished.
+
         foreach ($hookObjectsArr as $hookObj) {
             if (method_exists($hookObj, 'processDatamap_afterAllOperations')) {
+                // When this hook gets called, all operations on the submitted data have been finished.
                 $hookObj->processDatamap_afterAllOperations($this);
             }
         }
@@ -1126,6 +1014,21 @@ class DataHandler
         $schema = $this->tcaSchemaFactory->get($tableName);
         foreach ($schema->getFields() as $fieldName => $field) {
             if ($field->isType(TableColumnType::SLUG) && !isset($fieldValues[$fieldName])) {
+                $fieldValues[$fieldName] = '';
+            }
+        }
+        return $fieldValues;
+    }
+
+    /**
+     *  New records having uuid (TCA type 'uuid') fields defined as required need to
+     *  be set, in order to run through the validation process to create a new uuid.
+     */
+    protected function initializeUuidFieldsToEmptyString(string $tableName, array $fieldValues): array
+    {
+        $schema = $this->tcaSchemaFactory->get($tableName);
+        foreach ($schema->getFields() as $fieldName => $field) {
+            if ($field->isType(TableColumnType::UUID) && !isset($fieldValues[$fieldName]) && $field->isRequired()) {
                 $fieldValues[$fieldName] = '';
             }
         }
@@ -1165,7 +1068,7 @@ class DataHandler
             $fieldArray[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()] = $sortingInfo['sortNumber'];
         } else {
             // Here we fetch the PID of the record that we point to
-            $record = $this->recordInfo($table, abs($pid));
+            $record = BackendUtility::getRecord($table, abs($pid), '*', '', false);
             // Ensure that the "pid" is not a translated page ID, but the default page ID
             $fieldArray['pid'] = $this->getDefaultLanguagePageId($record['pid']);
         }
@@ -1176,19 +1079,16 @@ class DataHandler
      * Filling in the field array
      * $this->excludedTablesAndFields is used to filter fields if needed.
      *
-     * @param string $table Table name
      * @param int|string $id Record ID
      * @param array $fieldArray Default values, Preset $fieldArray with 'pid' maybe (pid and uid will be not be overridden anyway)
      * @param array $incomingFieldArray Is which fields/values you want to set. There are processed and put into $fieldArray if OK
      * @param int $realPid The real PID value of the record. For updates, this is just the pid of the record. For new records this is the PID of the page where it is inserted.
      * @param string $status Is 'new' or 'update'
      * @param int $tscPID TSconfig PID
-     * @return array Field Array
      * @internal should only be used from within DataHandler
      */
-    public function fillInFieldArray($table, $id, array $fieldArray, array $incomingFieldArray, $realPid, $status, $tscPID)
+    public function fillInFieldArray(string $table, $id, array $fieldArray, array $incomingFieldArray, $realPid, $status, $tscPID): array
     {
-        // Initialize:
         $schema = $this->tcaSchemaFactory->get($table);
         $originalLanguageRecord = null;
         $originalLanguage_diffStorage = null;
@@ -1203,7 +1103,7 @@ class DataHandler
         } else {
             $id = (int)$id;
             // We must use the current values as basis for this!
-            $currentRecord = ($checkValueRecord = $this->recordInfo($table, $id));
+            $currentRecord = ($checkValueRecord = BackendUtility::getRecord($table, $id, '*', '', false));
         }
 
         // Get original language record if available:
@@ -1217,8 +1117,8 @@ class DataHandler
                 if ((int)($currentRecord[$languageCapability->getLanguageField()->getName()] ?? 0) > 0
                     && (int)($currentRecord[$languageCapability->getTranslationOriginPointerField()->getName()] ?? 0) > 0
                 ) {
-                    $originalLanguageRecord = $this->recordInfo($table, $currentRecord[$languageCapability->getTranslationOriginPointerField()->getName()]);
-                    BackendUtility::workspaceOL($table, $originalLanguageRecord);
+                    $originalLanguageRecord = BackendUtility::getRecord($table, $currentRecord[$languageCapability->getTranslationOriginPointerField()->getName()], '*', '', false);
+                    BackendUtility::workspaceOL($table, $originalLanguageRecord, $this->BE_USER->workspace);
                     $originalLanguage_diffStorage = json_decode(
                         (string)($currentRecord[$languageCapability->getDiffSourceField()->getName()] ?? ''),
                         true
@@ -1259,7 +1159,7 @@ class DataHandler
                 case 'perms_group':
                 case 'perms_everybody':
                     // Permissions can be edited by the owner or the administrator
-                    if ($table === 'pages' && ($this->admin || $status === 'new' || $this->pageInfo((int)$id, 'perms_userid') == $this->userid)) {
+                    if ($table === 'pages' && ($this->admin || $status === 'new' || (int)$currentRecord['perms_userid'] === $this->userid)) {
                         $value = (int)$fieldValue;
                         switch ($field) {
                             case 'perms_userid':
@@ -1289,7 +1189,19 @@ class DataHandler
                             $fieldArray[$field] = $res['value'];
                         }
                         // Add the value of the original record to the diff-storage content:
-                        if ($languageCapability && $languageCapability->hasDiffSourceField()) {
+                        if ($languageCapability && $languageCapability->hasDiffSourceField()
+                            // not "sys_language_uid", this is 0 in default language record by definition
+                            && $languageCapability->getLanguageField()->getName() !== (string)$field
+                            // not the "diffsource" field itself
+                            && $languageCapability->getDiffSourceField()->getName() !== (string)$field
+                            // not "l10n_parent", this is 0 in default language record by definition
+                            && $languageCapability->getTranslationOriginPointerField()->getName() !== (string)$field
+                            // not "l10n_source", this is 0 in default language record by definition
+                            && !($languageCapability->hasTranslationSourceField() && $languageCapability->getTranslationOriginPointerField()->getName() === (string)$field)
+                        ) {
+                            if (!is_array($originalLanguage_diffStorage)) {
+                                $originalLanguage_diffStorage = [];
+                            }
                             $originalLanguage_diffStorage[$field] = (string)($originalLanguageRecord[$field] ?? '');
                             $diffStorageFlag = true;
                         }
@@ -1319,16 +1231,12 @@ class DataHandler
         ) {
             // If the field is set it would probably be because of an undo-operation - in which case we should not
             // update the field of course. On the other hand, e.g. for record localization, we need to update the field.
+            ksort($originalLanguage_diffStorage);
             $fieldArray[$languageCapability->getDiffSourceField()->getName()] = json_encode($originalLanguage_diffStorage);
         }
         return $fieldArray;
     }
 
-    /*********************************************
-     *
-     * Evaluation of input values
-     *
-     ********************************************/
     /**
      * Evaluates a value according to $table/$field settings.
      * This function is for real database fields - NOT FlexForm "pseudo" fields.
@@ -1347,72 +1255,37 @@ class DataHandler
      */
     public function checkValue($table, $field, $value, $id, $status, $realPid, $tscPID, $incomingFieldArray = []): array
     {
-        $curValueRec = null;
-        // Result array
-        $res = [];
+        $currentRecord = null;
+        $currentRecordValue = null;
+        if ((int)$id !== 0) {
+            // Int cast of $id can be 0 with NEW... records
+            // @todo: Hand over current record if there is some to avoid guesswork and DB call here
+            $currentRecord = BackendUtility::getRecord($table, (int)$id, '*', '', false);
+            // isset() won't work here, since values can be NULL
+            if ($currentRecord !== null && array_key_exists($field, $currentRecord)) {
+                $currentRecordValue = $currentRecord[$field];
+            }
+        }
 
-        // Processing special case of field pages.doktype
         if ($table === 'pages' && $field === 'doktype') {
-            // If the user may not use this specific doktype, we issue a warning
+            // Processing special case of field pages.doktype
             if (!($this->admin || GeneralUtility::inList($this->BE_USER->groupData['pagetypes_select'], $value))) {
-                if ($this->enableLogging) {
-                    $propArr = $this->getRecordProperties($table, $id);
-                    $this->log($table, (int)$id, SystemLogDatabaseAction::CHECK, 0, SystemLogErrorClassification::USER_ERROR, 'You cannot change the "doktype" of page "{title}" to the desired value', 1, ['title' => $propArr['header']], $propArr['event_pid']);
-                }
-                return $res;
+                // User is not allowed to use this specific doktype
+                $this->log($table, (int)$id, SystemLogDatabaseAction::CHECK, null, SystemLogErrorClassification::USER_ERROR, 'User lacks permissions to set pages:{uid} doktype to "{value}"', null, ['uid' => $id, 'value' => $value], $currentRecord['pid'] ?? 0);
+                return [];
             }
             if ($status === 'update') {
-                // This checks 1) if we should check for disallowed tables and 2) if there are records from disallowed tables on the current page
-                $onlyAllowedTables = $this->pageDoktypeRegistry->doesDoktypeOnlyAllowSpecifiedRecordTypes((int)$value);
-                if ($onlyAllowedTables) {
-                    // use the real page id (default language)
+                // Switching from one doktype to a different one. This is denied if the new doktype restricts the
+                // list of tables that can exist on them and if there are such records on the current page.
+                if ($this->pageDoktypeRegistry->doesDoktypeOnlyAllowSpecifiedRecordTypes((int)$value)) {
+                    // Use the page uid of the default language
                     $recordId = $this->getDefaultLanguagePageId((int)$id);
-                    $theWrongTables = $this->doesPageHaveUnallowedTables($recordId, (int)$value);
-                    if ($theWrongTables !== []) {
-                        if ($this->enableLogging) {
-                            $propArr = $this->getRecordProperties($table, $id);
-                            $this->log($table, (int)$id, SystemLogDatabaseAction::CHECK, 0, SystemLogErrorClassification::USER_ERROR, '"doktype" of page "{title}" could not be changed because the page contains records from disallowed tables; {disallowedTables}', 2, ['title' => $propArr['header'], 'disallowedTables' => implode(', ', $theWrongTables)], $propArr['event_pid']);
-                        }
-                        return $res;
+                    $existingDisallowedTables = $this->doesPageHaveUnallowedTables($recordId, (int)$value);
+                    if ($existingDisallowedTables !== []) {
+                        $this->log($table, (int)$id, SystemLogDatabaseAction::CHECK, null, SystemLogErrorClassification::USER_ERROR, 'Can not set pages:{uid} doktype to "{value}". The page contains records from tables "{disallowedTables}" that are not allowed with new doktype.', null, ['uid' => (int)$id, 'value' => $value, 'disallowedTables' => implode(', ', $existingDisallowedTables)], $recordId);
+                        return [];
                     }
                 }
-            }
-        }
-
-        $curValue = null;
-        if ((int)$id !== 0) {
-            // Get current value:
-            $curValueRec = $this->recordInfo($table, (int)$id);
-            // isset() won't work here, since values can be NULL
-            if ($curValueRec !== null && array_key_exists($field, $curValueRec)) {
-                $curValue = $curValueRec[$field];
-            }
-        }
-
-        if ($table === 'be_users'
-            && ($field === 'admin' || $field === 'password')
-            && $status === 'update'
-        ) {
-            // Do not allow a non system maintainer admin to change admin flag and password of system maintainers
-            $systemMaintainers = array_map(intval(...), $GLOBALS['TYPO3_CONF_VARS']['SYS']['systemMaintainers'] ?? []);
-            // False if current user is not in system maintainer list or if switch to user mode is active
-            $isCurrentUserSystemMaintainer = $this->BE_USER->isSystemMaintainer();
-            $isTargetUserInSystemMaintainerList = in_array((int)$id, $systemMaintainers, true);
-            if ($field === 'admin') {
-                $isFieldChanged = (int)$curValueRec[$field] !== (int)$value;
-            } else {
-                $isFieldChanged = $curValueRec[$field] !== $value;
-            }
-            if (!$isCurrentUserSystemMaintainer && $isTargetUserInSystemMaintainerList && $isFieldChanged) {
-                $value = $curValueRec[$field];
-                $this->log(
-                    $table,
-                    (int)$id,
-                    SystemLogDatabaseAction::UPDATE,
-                    0,
-                    SystemLogErrorClassification::SECURITY_NOTICE,
-                    'Only system maintainers can change the admin flag and password of other system maintainers. The value has not been updated'
-                );
             }
         }
 
@@ -1426,9 +1299,7 @@ class DataHandler
             $recFID = '';
         }
 
-        // Perform processing:
-        $res = $this->checkValue_SW($res, $value, $tcaFieldConf, $table, $id, $curValue, $status, $realPid, $recFID, $field, $tscPID, ['incomingFieldArray' => $incomingFieldArray]);
-        return $res;
+        return $this->checkValue_SW([], $value, $tcaFieldConf, $table, $id, $currentRecordValue, $status, $realPid, $recFID, $field, $tscPID, ['incomingFieldArray' => $incomingFieldArray]);
     }
 
     /**
@@ -1698,11 +1569,20 @@ class DataHandler
 
         // Checking range of value:
         if (is_array($tcaFieldConf['range'] ?? false)) {
-            if (isset($tcaFieldConf['range']['upper']) && ceil($result['value']) > (int)$tcaFieldConf['range']['upper']) {
-                $result['value'] = (int)$tcaFieldConf['range']['upper'];
-            }
-            if (isset($tcaFieldConf['range']['lower']) && floor($result['value']) < (int)$tcaFieldConf['range']['lower']) {
-                $result['value'] = (int)$tcaFieldConf['range']['lower'];
+            if ($format === 'decimal') {
+                if (isset($tcaFieldConf['range']['upper']) && ceil((float)$result['value']) > (float)$tcaFieldConf['range']['upper']) {
+                    $result['value'] = (float)$tcaFieldConf['range']['upper'];
+                }
+                if (isset($tcaFieldConf['range']['lower']) && floor((float)$result['value']) < (float)$tcaFieldConf['range']['lower']) {
+                    $result['value'] = (float)$tcaFieldConf['range']['lower'];
+                }
+            } else {
+                if (isset($tcaFieldConf['range']['upper']) && ceil($result['value']) > (int)$tcaFieldConf['range']['upper']) {
+                    $result['value'] = (int)$tcaFieldConf['range']['upper'];
+                }
+                if (isset($tcaFieldConf['range']['lower']) && floor($result['value']) < (int)$tcaFieldConf['range']['lower']) {
+                    $result['value'] = (int)$tcaFieldConf['range']['lower'];
+                }
             }
         }
 
@@ -1763,7 +1643,7 @@ class DataHandler
 
         if ($value !== '' && !GeneralUtility::validEmail($value)) {
             // A non-empty value is given, which however is no valid email. Log this and unset the value afterwards.
-            $this->log($table, $id, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::USER_ERROR, '"{email}" is not a valid e-mail address for the field "{field}" of the table "{table}"', -1, ['email' => $value, 'field' => $field, 'table' => $table]);
+            $this->log($table, $id, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, '"{email}" is not a valid e-mail address for the field "{field}" of the table "{table}"', null, ['email' => $value, 'field' => $field, 'table' => $table]);
             $value = '';
         }
 
@@ -1871,10 +1751,10 @@ class DataHandler
                     $table,
                     (int)$id,
                     SystemLogDatabaseAction::UPDATE,
-                    0,
+                    null,
                     SystemLogErrorClassification::WARNING,
                     $message . implode('. ', $passwordPolicyValidator->getValidationErrors()),
-                    -1,
+                    null,
                     [
                         'table' => $table,
                         'uid' => (string)$id,
@@ -1892,6 +1772,13 @@ class DataHandler
 
             // Get an instance of the current configured salted password strategy and hash the value
             $value = $newHashInstance->getHashedPassword($value);
+        }
+
+        if (!($tcaFieldConf['nullable'] ?? false) && $value === null) {
+            // type=password columns are by default NOT NULL-able.
+            // In this case, an invalid password needs to be an empty string to not throw an SQL error
+            // on a potential optional password.
+            $value = '';
         }
 
         return [
@@ -2003,7 +1890,7 @@ class DataHandler
             // Extract the actual link from the link definition for further evaluation
             $linkParameter = $this->typoLinkCodecService->decode($value)['url'];
             if ($linkParameter === '') {
-                $this->log($table, $id, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::USER_ERROR, '"{link}" is not a valid link definition for the field "{field}" of the table "{table}"', -1, ['link' => $value, 'field' => $field, 'table' => $table]);
+                $this->log($table, $id, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, '"{link}" is not a valid link definition for the field "{field}" of the table "{table}"', null, ['link' => $value, 'field' => $field, 'table' => $table]);
                 $value = '';
             } else {
                 // Try to resolve the actual link type and compare with the allow list
@@ -2019,11 +1906,11 @@ class DataHandler
                         $message = $linkIdentifier !== ''
                             ? 'Link type "record" with identifier "{type}" is not allowed for the field "{field}" of the table "{table}"'
                             : 'Link type "{type}" is not allowed for the field "{field}" of the table "{table}"';
-                        $this->log($table, $id, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::USER_ERROR, $message, -1, ['type' => $linkIdentifier ?: $linkType, 'field' => $field, 'table' => $table]);
+                        $this->log($table, $id, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, $message, null, ['type' => $linkIdentifier ?: $linkType, 'field' => $field, 'table' => $table]);
                         $value = '';
                     }
                 } catch (UnknownLinkHandlerException $e) {
-                    $this->log($table, $id, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::USER_ERROR, '"{link}" is not a valid link for the field "{field}" of the table "{table}"', -1, ['link' => $value, 'field' => $field, 'table' => $table]);
+                    $this->log($table, $id, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, '"{link}" is not a valid link for the field "{field}" of the table "{table}"', null, ['link' => $value, 'field' => $field, 'table' => $table]);
                     $value = '';
                 }
             }
@@ -2153,10 +2040,11 @@ class DataHandler
 
         // Skip range validation, if the default value equals 0 and the input value is 0, "0" or an empty string.
         // This is needed for timestamp date fields with ['range']['lower'] set.
-        $skipRangeValidation =
-            isset($tcaFieldConf['default'], $value)
-            && (int)$tcaFieldConf['default'] === 0
-            && ($value === '' || $value === '0' || $value === 0);
+        $isNullable = $tcaFieldConf['nullable'] ?? $isNativeDateTimeField;
+        $skipRangeValidation = (
+            (isset($tcaFieldConf['default'], $value) && (int)$tcaFieldConf['default'] === 0 && ($value === '' || $value === '0' || $value === 0)) ||
+            $isNullable && $value === ''
+        );
 
         // Checking range of value:
         if (!$skipRangeValidation && is_array($tcaFieldConf['range'] ?? null)) {
@@ -2257,10 +2145,10 @@ class DataHandler
                     $table,
                     $id,
                     SystemLogDatabaseAction::CHECK,
-                    0,
+                    null,
                     SystemLogErrorClassification::USER_ERROR,
                     'Could not activate checkbox for field "{field}". A total of {max} record(s) can have this checkbox activated. Uncheck other records first in order to activate the checkbox of this record',
-                    -1,
+                    null,
                     ['field' => $field, 'max' => $maxCheckedRecords]
                 );
             }
@@ -2319,13 +2207,15 @@ class DataHandler
     /**
      * Evaluate "json" type values.
      *
-     * @param array|string $value The value to set.
+     * @param array|string|null $value The value to set.
      * @param array $tcaFieldConf Field configuration from TCA
      * @return array The result array. The processed value (if any!) is set in the "value" key.
      */
-    protected function checkValueForJson(array|string $value, array $tcaFieldConf): array
+    protected function checkValueForJson(array|string|null $value, array $tcaFieldConf): array
     {
-        if (is_string($value)) {
+        if ($value === null) {
+            $value = [];
+        } elseif (is_string($value)) {
             if ($value === '') {
                 $value = [];
             } else {
@@ -2445,7 +2335,6 @@ class DataHandler
         if (Uuid::isValid($value)) {
             return ['value' => $value];
         }
-
         if ($tcaFieldConf['required'] ?? true) {
             return ['value' => (string)match ((int)($tcaFieldConf['version'] ?? 0)) {
                 6 => Uuid::v6(),
@@ -2727,11 +2616,6 @@ class DataHandler
         return array_slice($valueArray, 0, $maxitems);
     }
 
-    /*********************************************
-     *
-     * Helper functions for evaluation functions.
-     *
-     ********************************************/
     /**
      * Gets a unique value for $table/$id/$field based on $value
      *
@@ -2781,7 +2665,7 @@ class DataHandler
         }
 
         if ($originalValue !== $newValue) {
-            $this->log($table, $id, SystemLogDatabaseAction::CHECK, 0, SystemLogErrorClassification::WARNING, 'The value of the field "{field}" has been changed from "{originalValue}" to "{newValue}" as it is required to be unique', 1, ['field' => $field, 'originalValue' => $originalValue, 'newValue' => $newValue], $newPid);
+            $this->log($table, $id, SystemLogDatabaseAction::CHECK, null, SystemLogErrorClassification::WARNING, 'The value of the field "{field}" has been changed from "{originalValue}" to "{newValue}" as it is required to be unique', null, ['field' => $field, 'originalValue' => $originalValue, 'newValue' => $newValue], $newPid);
         }
 
         return $newValue;
@@ -2805,7 +2689,7 @@ class DataHandler
         int $pid
     ): QueryBuilder {
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-        $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
+        $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
         $queryBuilder
             ->count('uid')
             ->from($table)
@@ -3157,7 +3041,7 @@ class DataHandler
      * @param array $dataStructure Data structure for the form (might be sheets or not). Only values in the data array which has a configuration in the data structure will be processed.
      * @param array $pParams A set of parameters to pass through for the calling of the evaluation functions
      * @param string $callBackFunc Optional call back function, see checkValue_flex_procInData_travDS()  DEPRECATED, use \TYPO3\CMS\Core\Configuration\FlexForm\FlexFormTools instead for traversal!
-     * @return array The modified 'data' part.
+     * @return ?array The modified 'data' part.
      * @see checkValue_flex_procInData_travDS()
      * @internal should only be used from within DataHandler
      */
@@ -3355,24 +3239,27 @@ class DataHandler
      */
     protected function checkValue_file_processDBdata($valueArray, $tcaFieldConf, $id, $table): mixed
     {
-        $valueArray = GeneralUtility::makeInstance(FileExtensionFilter::class)->filter(
+        $filteredValueArray = GeneralUtility::makeInstance(FileExtensionFilter::class)->filter(
             $valueArray,
             (string)($tcaFieldConf['allowed'] ?? ''),
             (string)($tcaFieldConf['disallowed'] ?? ''),
-            $this
         );
-
+        $disallowedReferences = array_diff($valueArray, $filteredValueArray);
+        foreach ($disallowedReferences as $reference) {
+            // Remove not allowed sys_file_reference rows for this record
+            $parts = GeneralUtility::revExplode('_', (string)$reference, 2);
+            $fileReferenceUid = (int)$parts[count($parts) - 1];
+            if ($fileReferenceUid <= 0) {
+                continue;
+            }
+            $this->deleteAction('sys_file_reference', $fileReferenceUid);
+        }
         $dbAnalysis = $this->createRelationHandlerInstance();
-        $dbAnalysis->start(implode(',', $valueArray), $tcaFieldConf['foreign_table'], '', 0, $table, $tcaFieldConf);
+        $dbAnalysis->start(implode(',', $filteredValueArray), $tcaFieldConf['foreign_table'], '', 0, $table, $tcaFieldConf);
         $dbAnalysis->writeForeignField($tcaFieldConf, $id);
         return $dbAnalysis->countItems(false);
     }
 
-    /*********************************************
-     *
-     * PROCESSING COMMANDS
-     *
-     ********************************************/
     /**
      * Processing the cmd-array
      * See "TYPO3 Core API" for a description of the options.
@@ -3383,7 +3270,7 @@ class DataHandler
     {
         // Editing frozen:
         if ($this->BE_USER->workspace !== 0 && ($this->BE_USER->workspaceRec['freeze'] ?? false)) {
-            $this->log('sys_workspace', $this->BE_USER->workspace, SystemLogDatabaseAction::VERSIONIZE, 0, SystemLogErrorClassification::USER_ERROR, 'All editing in this workspace has been frozen');
+            $this->log('sys_workspace', $this->BE_USER->workspace, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'All editing in this workspace has been frozen');
             return false;
         }
         // Hook initialization:
@@ -3398,13 +3285,13 @@ class DataHandler
         $pasteDatamap = [];
         // Traverse command map:
         foreach ($this->cmdmap as $table => $idCommandArray) {
-            // Check if the table may be modified!
-            $modifyAccessList = $this->checkModifyAccessList($table);
-            if (!$modifyAccessList) {
-                $this->log($table, 0, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to modify table "{table}" without permission', 1, ['table' => $table]);
+            if (!$this->checkModifyAccessList($table)) {
+                // Check if the table may be modified!
+                $this->log($table, 0, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to modify table "{table}" without permission', null, ['table' => $table]);
+                continue;
             }
             // Check basic permissions and circumstances:
-            if (!$this->tcaSchemaFactory->has($table) || $this->tcaSchemaFactory->get($table)->hasCapability(TcaSchemaCapability::AccessReadOnly) || !$modifyAccessList) {
+            if (!$this->tcaSchemaFactory->has($table) || $this->tcaSchemaFactory->get($table)->hasCapability(TcaSchemaCapability::AccessReadOnly)) {
                 continue;
             }
 
@@ -3421,10 +3308,24 @@ class DataHandler
 
                 foreach ($incomingCmdArray as $command => $value) {
                     $pasteUpdate = false;
+                    $schema = $this->tcaSchemaFactory->get($table);
+                    $languageField = $schema->isLanguageAware() ? $schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName() : null;
                     if (is_array($value) && isset($value['action']) && $value['action'] === 'paste') {
                         // Extended paste command: $command is set to "move" or "copy"
                         // $value['update'] holds field/value pairs which should be updated after copy/move operation
                         // $value['target'] holds original $value (target of move/copy)
+                        if ($languageField) {
+                            $row = BackendUtility::getRecord($table, $id);
+                            $languageId = $value['update'][$languageField] ?? null;
+                            // Update language field after copy/move only if language was changed
+                            if ($languageId !== null && (int)$languageId === $row[$languageField]) {
+                                unset($value['update'][$languageField]);
+                            }
+                            // Reset language for a -1 element from original record if copied or moved into language 0
+                            if ($row[$languageField] === -1 && (int)$languageId === 0) {
+                                $value['update'][$languageField] = $row[$languageField];
+                            }
+                        }
                         $pasteUpdate = $value['update'];
                         $value = $value['target'];
                     }
@@ -3452,7 +3353,7 @@ class DataHandler
                         // Branch, based on command
                         switch ($command) {
                             case 'move':
-                                $this->moveRecord($table, (int)$id, $value);
+                                $this->moveRecord($table, (int)$id, (int)$value);
                                 if (is_array($pasteUpdate) && $procId > 0) {
                                     // Update after copy/move operation
                                     $pasteDatamap[$table][$procId] = $pasteUpdate;
@@ -3482,12 +3383,8 @@ class DataHandler
                                     foreach ($this->copyMappingArray as $procTable => $copyProcIds) {
                                         foreach ($copyProcIds as $copyProcId) {
                                             if ($copyProcId !== $procId) {
-                                                $schema = $this->tcaSchemaFactory->get($procTable);
-                                                if ($schema->isLanguageAware()) {
-                                                    $languageField = $schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName();
-                                                    if (isset($pasteUpdate[$languageField])) {
-                                                        $pasteDatamap[$procTable][$copyProcId][$languageField] = $pasteUpdate[$languageField];
-                                                    }
+                                                if ($languageField !== null && isset($pasteUpdate[$languageField])) {
+                                                    $pasteDatamap[$procTable][$copyProcId][$languageField] = $pasteUpdate[$languageField];
                                                 }
                                             }
                                         }
@@ -3511,10 +3408,18 @@ class DataHandler
                                 $this->inlineLocalizeSynchronize($table, (int)$id, $value);
                                 break;
                             case 'delete':
-                                $this->deleteAction($table, (int)$id);
+                                $this->deleteAction((string)$table, (int)$id);
                                 break;
                             case 'undelete':
                                 $this->undeleteRecord((string)$table, (int)$id);
+                                break;
+                            case 'version':
+                                $action = $value['action'] ?? null;
+                                if ($action === 'new') {
+                                    $this->versionizeRecord($table, $id, $value['label'] ?? null);
+                                } elseif ($value['action'] === 'clearWSID' || $value['action'] === 'flush') {
+                                    $this->discard((string)$table, (int)$id);
+                                }
                                 break;
                         }
                     }
@@ -3550,11 +3455,6 @@ class DataHandler
         }
     }
 
-    /*********************************************
-     *
-     * Cmd: Copying
-     *
-     ********************************************/
     /**
      * Copying a single record
      *
@@ -3569,7 +3469,7 @@ class DataHandler
      * @return int|null ID of new record, if any
      * @internal should only be used from within DataHandler
      */
-    public function copyRecord($table, $uid, $destPid, $first = false, $overrideValues = [], $excludeFields = '', $language = 0, $ignoreLocalization = false)
+    public function copyRecord($table, $uid, $destPid, $first = false, $overrideValues = [], $excludeFields = '', $language = 0, $ignoreLocalization = false): ?int
     {
         $uid = ($origUid = (int)$uid);
         // Only copy if the table has a Schema, a uid is given and the record wasn't copied before:
@@ -3580,12 +3480,26 @@ class DataHandler
             return null;
         }
 
-        // Fetch record with permission check
-        $row = $this->recordInfoWithPermissionCheck($table, $uid, Permission::PAGE_SHOW);
-
-        // This checks if the record can be selected which is all that a copy action requires.
-        if ($row === false) {
-            $this->log($table, $uid, SystemLogDatabaseAction::INSERT, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to copy record "{table}:{uid}" which does not exist or you do not have permission to read', -1, ['table' => $table, 'uid' => $uid]);
+        $row = BackendUtility::getRecord($table, $uid);
+        if (!is_array($row)) {
+            $this->log($table, $uid, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to copy record "{table}:{uid}" which does not exist', null, ['table' => $table, 'uid' => (int)$uid]);
+            return null;
+        }
+        BackendUtility::workspaceOL($table, $row, $this->BE_USER->workspace);
+        $pageRecord = [];
+        if ($table === 'pages') {
+            $pageRecord = $row;
+        } elseif ((int)$row['pid'] > 0) {
+            $pageRecord = BackendUtility::getRecord('pages', $row['pid']);
+            if (!is_array($pageRecord)) {
+                $this->log($table, $uid, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to copy record "{table}:{uid}" which is not assigned to a valid page', null, ['table' => $table, 'uid' => (int)$uid]);
+                return null;
+            }
+        }
+        if (($pageRecord === [] && $row['pid'] === 0 && !($this->admin || BackendUtility::isRootLevelRestrictionIgnored($table)))
+            || (($pageRecord !== [] || $row['pid'] !== 0) && !$this->hasPagePermission(Permission::PAGE_SHOW, $pageRecord))
+        ) {
+            $this->log($table, $uid, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to copy record "{table}:{uid}" without read permissions', null, ['table' => $table, 'uid' => (int)$uid]);
             return null;
         }
 
@@ -3593,15 +3507,15 @@ class DataHandler
         $tscPID = (int)BackendUtility::getTSconfig_pidValue($table, $uid, $destPid);
 
         // Check if table is allowed on destination page
-        if (!$this->isTableAllowedForThisPage($tscPID, $table)) {
-            $this->log($table, $uid, SystemLogDatabaseAction::INSERT, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert record "{table}:{uid}" on a page ({pid}) that can\'t store record type', -1, ['table' => $table, 'uid' => $uid, 'pid' => $tscPID]);
+        if (!$this->isTableAllowedForThisPage($tscPID, $table, $pageRecord)) {
+            $this->log($table, $uid, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert record "{table}:{uid}" on a page ({pid}) that can\'t store record type', null, ['table' => $table, 'uid' => $uid, 'pid' => $tscPID]);
             return null;
         }
 
         $fullLanguageCheckNeeded = $table !== 'pages';
         // Used to check language and general editing rights
-        if (!$ignoreLocalization && ($language <= 0 || !$this->BE_USER->checkLanguageAccess($language)) && !$this->BE_USER->recordEditAccessInternals($table, $uid, false, false, $fullLanguageCheckNeeded)) {
-            $this->log($table, $uid, SystemLogDatabaseAction::INSERT, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to copy record "{table}:{uid}" without having permissions to do so [{reason}]', -1, ['table' => $table, 'uid' => $uid, 'reason' => $this->BE_USER->errorMsg]);
+        if (!$ignoreLocalization && ($language <= 0 || !$this->BE_USER->checkLanguageAccess($language)) && !$this->BE_USER->recordEditAccessInternals($table, $row, false, null, $fullLanguageCheckNeeded)) {
+            $this->log($table, $uid, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to copy record "{table}:{uid}" without having permissions to do so [{reason}]', null, ['table' => $table, 'uid' => $uid, 'reason' => $this->BE_USER->errorMsg]);
             return null;
         }
 
@@ -3621,7 +3535,7 @@ class DataHandler
         $schema = $this->tcaSchemaFactory->get($table);
         $theNewID = StringUtility::getUniqueId('NEW');
         $disabledField = $schema->hasCapability(TcaSchemaCapability::RestrictionDisabledField) ? $schema->getCapability(TcaSchemaCapability::RestrictionDisabledField)->getField() : null;
-        $labelFieldName = $schema->hasCapability(TcaSchemaCapability::Label) ? $schema->getCapability(TcaSchemaCapability::Label)->getPrimaryField()?->getName() : '';
+        $labelFieldName = $schema->getCapability(TcaSchemaCapability::Label)->getPrimaryFieldName() ?? '';
         // Getting "copy-after" fields if applicable:
         $copyAfterFields = $destPid < 0 ? $this->fixCopyAfterDuplFields((string)$table, (int)abs($destPid)) : [];
         // Page TSconfig related:
@@ -3735,13 +3649,13 @@ class DataHandler
                     if (isset($newPid)) {
                         $this->copySpecificPage($thePageUid, $newPid, $copyTablesAlongWithPage);
                     } else {
-                        $this->log('pages', $uid, SystemLogDatabaseAction::CHECK, 0, SystemLogErrorClassification::USER_ERROR, 'Something went wrong during copying branch');
+                        $this->log('pages', $uid, SystemLogDatabaseAction::CHECK, null, SystemLogErrorClassification::USER_ERROR, 'Something went wrong during copying branch');
                         break;
                     }
                 }
             }
         } else {
-            $this->log('pages', $uid, SystemLogDatabaseAction::CHECK, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to copy page {uid} without permission to this table', -1, ['uid' => $uid]);
+            $this->log('pages', $uid, SystemLogDatabaseAction::CHECK, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to copy page {uid} without permission to this table', null, ['uid' => $uid]);
         }
     }
 
@@ -3787,127 +3701,126 @@ class DataHandler
     {
         // Copy the page itself:
         $theNewRootID = $this->copyRecord('pages', $uid, $destPid, $first);
+        if ($theNewRootID === null) {
+            return null;
+        }
         $currentWorkspaceId = (int)$this->BE_USER->workspace;
-        // If a new page was created upon the copy operation we will proceed with all the tables ON that page:
-        if ($theNewRootID) {
-            foreach ($copyTablesArray as $table) {
-                // All records under the page is copied.
-                if ($table && $this->tcaSchemaFactory->has($table) && $table !== 'pages') {
-                    $schema = $this->tcaSchemaFactory->get($table);
-                    $fields = ['uid'];
-                    $languageField = null;
-                    $transOrigPointerField = null;
-                    $translationSourceField = null;
-                    if ($schema->isLanguageAware()) {
-                        /** @var LanguageAwareSchemaCapability $languageCapability */
-                        $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
-                        $languageField = $languageCapability->getLanguageField()->getName();
-                        $transOrigPointerField = $languageCapability->getTranslationOriginPointerField()->getName();
-                        $fields[] = $languageField;
-                        $fields[] = $transOrigPointerField;
-                        if ($languageCapability->hasTranslationSourceField()) {
-                            $translationSourceField = $languageCapability->getTranslationSourceField()->getName();
-                            $fields[] = $translationSourceField;
-                        }
-                    }
-                    $isTableWorkspaceEnabled = $schema->isWorkspaceAware();
-                    if ($isTableWorkspaceEnabled) {
-                        $fields[] = 't3ver_oid';
-                        $fields[] = 't3ver_state';
-                        $fields[] = 't3ver_wsid';
-                    }
-                    $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-                    $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
-                    $queryBuilder->getRestrictions()->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, $currentWorkspaceId));
-                    $queryBuilder
-                        ->select(...$fields)
-                        ->from($table)
-                        ->where(
-                            $queryBuilder->expr()->eq(
-                                'pid',
-                                $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT)
-                            )
-                        );
-                    if ($schema->hasCapability(TcaSchemaCapability::SortByField)) {
-                        $queryBuilder->orderBy($schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName(), 'DESC');
-                    }
-                    $queryBuilder->addOrderBy('uid');
-                    try {
-                        $result = $queryBuilder->executeQuery();
-                        $rows = [];
-                        $movedLiveIds = [];
-                        $movedLiveRecords = [];
-                        while ($row = $result->fetchAssociative()) {
-                            if ($isTableWorkspaceEnabled && VersionState::tryFrom($row['t3ver_state'] ?? 0) === VersionState::MOVE_POINTER) {
-                                $movedLiveIds[(int)$row['t3ver_oid']] = (int)$row['uid'];
-                            }
-                            $rows[(int)$row['uid']] = $row;
-                        }
-                        // Resolve placeholders of workspace versions
-                        if (!empty($rows) && $currentWorkspaceId > 0 && $isTableWorkspaceEnabled) {
-                            // If a record was moved within the page, the PlainDataResolver needs the moved record
-                            // but not the original live version, otherwise the moved record is not considered at all.
-                            // For this reason, we find the live ids, where there was also a moved record in the SQL
-                            // query above in $movedLiveIds and now we removed them before handing them over to PlainDataResolver.
-                            // see changeContentSortingAndCopyDraftPage test
-                            foreach ($movedLiveIds as $liveId => $movePlaceHolderId) {
-                                if (isset($rows[$liveId])) {
-                                    $movedLiveRecords[$movePlaceHolderId] = $rows[$liveId];
-                                    unset($rows[$liveId]);
-                                }
-                            }
-                            $rows = array_reverse(
-                                $this->resolveVersionedRecords(
-                                    $table,
-                                    implode(',', $fields),
-                                    $schema->hasCapability(TcaSchemaCapability::SortByField) ? $schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName() : '',
-                                    array_keys($rows)
-                                ),
-                                true
-                            );
-                            foreach ($movedLiveRecords as $movePlaceHolderId => $liveRecord) {
-                                $rows[$movePlaceHolderId] = $liveRecord;
-                            }
-                        }
-                        if (is_array($rows)) {
-                            $languageSourceMap = [];
-                            $overrideValues = $translationSourceField ? [$translationSourceField => 0] : [];
-                            $doRemap = false;
-                            foreach ($rows as $row) {
-                                // Skip localized records that will be processed in
-                                // copyL10nOverlayRecords() on copying the default language record
-                                $transOrigPointer = $row[$transOrigPointerField] ?? 0;
-                                if (!empty($languageField)
-                                    && $row[$languageField] > 0
-                                    && $transOrigPointer > 0
-                                    && (isset($rows[$transOrigPointer]) || isset($movedLiveIds[$transOrigPointer]))
-                                ) {
-                                    continue;
-                                }
-                                // Copying each of the underlying records...
-                                $newUid = $this->copyRecord($table, $row['uid'], $theNewRootID, false, $overrideValues);
-                                if ($translationSourceField) {
-                                    $languageSourceMap[$row['uid']] = $newUid;
-                                    if ($row[$languageField] > 0) {
-                                        $doRemap = true;
-                                    }
-                                }
-                            }
-                            if ($doRemap) {
-                                //remap is needed for records in non-default language records in the "free mode"
-                                $this->copy_remapTranslationSourceField($table, $rows, $languageSourceMap);
-                            }
-                        }
-                    } catch (DBALException $e) {
-                        $databaseErrorMessage = $e->getPrevious()->getMessage();
-                        $this->log($table, $uid, SystemLogDatabaseAction::CHECK, 0, SystemLogErrorClassification::USER_ERROR, 'An SQL error occurred: {reason}', -1, ['reason' => $databaseErrorMessage]);
+        foreach ($copyTablesArray as $table) {
+            // All records under the page is copied.
+            if ($table && $this->tcaSchemaFactory->has($table) && $table !== 'pages') {
+                $schema = $this->tcaSchemaFactory->get($table);
+                $fields = ['uid'];
+                $languageField = null;
+                $transOrigPointerField = null;
+                $translationSourceField = null;
+                if ($schema->isLanguageAware()) {
+                    /** @var LanguageAwareSchemaCapability $languageCapability */
+                    $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
+                    $languageField = $languageCapability->getLanguageField()->getName();
+                    $transOrigPointerField = $languageCapability->getTranslationOriginPointerField()->getName();
+                    $fields[] = $languageField;
+                    $fields[] = $transOrigPointerField;
+                    if ($languageCapability->hasTranslationSourceField()) {
+                        $translationSourceField = $languageCapability->getTranslationSourceField()->getName();
+                        $fields[] = $translationSourceField;
                     }
                 }
+                $isTableWorkspaceEnabled = $schema->isWorkspaceAware();
+                if ($isTableWorkspaceEnabled) {
+                    $fields[] = 't3ver_oid';
+                    $fields[] = 't3ver_state';
+                    $fields[] = 't3ver_wsid';
+                }
+                $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
+                $queryBuilder->getRestrictions()->removeAll()
+                    ->add(GeneralUtility::makeInstance(DeletedRestriction::class))
+                    ->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, $currentWorkspaceId));
+                $queryBuilder
+                    ->select(...$fields)
+                    ->from($table)
+                    ->where(
+                        $queryBuilder->expr()->eq(
+                            'pid',
+                            $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT)
+                        )
+                    );
+                if ($schema->hasCapability(TcaSchemaCapability::SortByField)) {
+                    $queryBuilder->orderBy($schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName(), 'DESC');
+                }
+                $queryBuilder->addOrderBy('uid');
+                try {
+                    $result = $queryBuilder->executeQuery();
+                    $rows = [];
+                    $movedLiveIds = [];
+                    $movedLiveRecords = [];
+                    while ($row = $result->fetchAssociative()) {
+                        if ($isTableWorkspaceEnabled && VersionState::tryFrom($row['t3ver_state'] ?? 0) === VersionState::MOVE_POINTER) {
+                            $movedLiveIds[(int)$row['t3ver_oid']] = (int)$row['uid'];
+                        }
+                        $rows[(int)$row['uid']] = $row;
+                    }
+                    // Resolve placeholders of workspace versions
+                    if (!empty($rows) && $currentWorkspaceId > 0 && $isTableWorkspaceEnabled) {
+                        // If a record was moved within the page, the PlainDataResolver needs the moved record
+                        // but not the original live version, otherwise the moved record is not considered at all.
+                        // For this reason, we find the live ids, where there was also a moved record in the SQL
+                        // query above in $movedLiveIds and now we removed them before handing them over to PlainDataResolver.
+                        // see changeContentSortingAndCopyDraftPage test
+                        foreach ($movedLiveIds as $liveId => $movePlaceHolderId) {
+                            if (isset($rows[$liveId])) {
+                                $movedLiveRecords[$movePlaceHolderId] = $rows[$liveId];
+                                unset($rows[$liveId]);
+                            }
+                        }
+                        $rows = array_reverse(
+                            $this->resolveVersionedRecords(
+                                $table,
+                                implode(',', $fields),
+                                $schema->hasCapability(TcaSchemaCapability::SortByField) ? $schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName() : '',
+                                array_keys($rows)
+                            ),
+                            true
+                        );
+                        foreach ($movedLiveRecords as $movePlaceHolderId => $liveRecord) {
+                            $rows[$movePlaceHolderId] = $liveRecord;
+                        }
+                    }
+                    if (is_array($rows)) {
+                        $languageSourceMap = [];
+                        $overrideValues = $translationSourceField ? [$translationSourceField => 0] : [];
+                        $doRemap = false;
+                        foreach ($rows as $row) {
+                            // Skip localized records that will be processed in
+                            // copyL10nOverlayRecords() on copying the default language record
+                            $transOrigPointer = $row[$transOrigPointerField ?? ''] ?? 0;
+                            if (!empty($languageField)
+                                && $row[$languageField] > 0
+                                && $transOrigPointer > 0
+                                && (isset($rows[$transOrigPointer]) || isset($movedLiveIds[$transOrigPointer]))
+                            ) {
+                                continue;
+                            }
+                            // Copying each of the underlying records...
+                            $newUid = $this->copyRecord($table, $row['uid'], $theNewRootID, false, $overrideValues);
+                            if ($translationSourceField) {
+                                $languageSourceMap[$row['uid']] = $newUid;
+                                if ($row[$languageField] > 0) {
+                                    $doRemap = true;
+                                }
+                            }
+                        }
+                        if ($doRemap) {
+                            //remap is needed for records in non-default language records in the "free mode"
+                            $this->copy_remapTranslationSourceField($table, $rows, $languageSourceMap);
+                        }
+                    }
+                } catch (DBALException $e) {
+                    $this->log($table, $uid, SystemLogDatabaseAction::CHECK, null, SystemLogErrorClassification::USER_ERROR, 'An SQL error occurred: {reason}', null, ['reason' => $e->getMessage()]);
+                }
             }
-            $this->processRemapStack();
-            return $theNewRootID;
         }
-        return null;
+        $this->processRemapStack();
+        return $theNewRootID;
     }
 
     /**
@@ -3926,7 +3839,7 @@ class DataHandler
      * @return int|null Returns the new ID of the record (if applicable)
      * @internal should only be used from within DataHandler
      */
-    public function copyRecord_raw($table, $uid, $pid, $overrideArray = [], array $workspaceOptions = [])
+    public function copyRecord_raw($table, $uid, $pid, $overrideArray = [], array $workspaceOptions = []): ?int
     {
         $uid = (int)$uid;
         // Stop any actions if the record is marked to be deleted:
@@ -3938,20 +3851,9 @@ class DataHandler
         if (!$this->tcaSchemaFactory->has($table) || !$uid || $this->isRecordCopied($table, $uid)) {
             return null;
         }
-
-        // Fetch record with permission check
-        $row = $this->recordInfoWithPermissionCheck($table, $uid, Permission::PAGE_SHOW);
-
-        // This checks if the record can be selected which is all that a copy action requires.
-        if ($row === false) {
-            $this->log(
-                $table,
-                $uid,
-                SystemLogDatabaseAction::INSERT,
-                0,
-                SystemLogErrorClassification::USER_ERROR,
-                'Attempt to rawcopy/versionize record which either does not exist or you don\'t have permission to read'
-            );
+        $row = BackendUtility::getRecord($table, $uid);
+        if (!is_array($row)) {
+            $this->log($table, $uid, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to create workspace version of a not existing record');
             return null;
         }
 
@@ -3995,7 +3897,8 @@ class DataHandler
         if ($theNewSQLID) {
             $this->dbAnalysisStoreExec();
             $this->dbAnalysisStore = [];
-            return $this->copyMappingArray[$table][$uid] = $theNewSQLID;
+            $this->copyMappingArray[$table][$uid] = $theNewSQLID;
+            return $theNewSQLID;
         }
         return null;
     }
@@ -4010,7 +3913,7 @@ class DataHandler
      * @return int|null Returns the new ID of the record (if applicable)
      * @internal should only be used from within DataHandler
      */
-    public function insertNewCopyVersion($table, $fieldArray, $realPid)
+    public function insertNewCopyVersion($table, $fieldArray, $realPid): ?int
     {
         $schema = $this->tcaSchemaFactory->get($table);
         $id = StringUtility::getUniqueId('NEW');
@@ -4038,7 +3941,7 @@ class DataHandler
             $fieldArray[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
         }
         // Finally, insert record:
-        $this->insertDB($table, $id, $fieldArray, $schema->isWorkspaceAware());
+        $this->insertDB($table, $id, $fieldArray);
         // Resets dontProcessTransformations to the previous state.
         $this->dontProcessTransformations = $backupDontProcessTransformations;
         // Return new id:
@@ -4082,12 +3985,22 @@ class DataHandler
             );
             $dataStructureArray = $this->flexFormTools->parseDataStructureByIdentifier($dataStructureIdentifier);
             $currentValue = is_string($value) ? GeneralUtility::xml2array($value) : null;
-            // Traversing the XML structure, processing files:
+            // Traversing the XML structure, processing relations in FlexForm such as inline records:
             if (is_array($currentValue)) {
-                $currentValue['data'] = $this->checkValue_flex_procInData($currentValue['data'] ?? [], [], $dataStructureArray, [$table, $uid, $field, $realDestPid], 'copyRecord_flexFormCallBack', $workspaceOptions);
+                $currentValue['data'] = $this->checkValue_flex_procInData($currentValue['data'] ?? [], [], $dataStructureArray, [$table, $uid, $field, $realDestPid, $language], 'copyRecord_flexFormCallBack', $workspaceOptions);
                 // Setting value as an array! -> which means the input will be processed according to the 'flex' type when the new copy is created.
                 $value = $currentValue;
             }
+        }
+        if (($conf['type'] ?? '') === 'uuid' && $value !== '') {
+            // Uuid is unique by definition. On copying a record, this value must be regenerated
+            // if set. In case uuid is not set, it might be optional - or the base record is
+            // invalid. In this case the uuid will then be generated by checkValueForUuid().
+            $value = (string)match ((int)($conf['version'] ?? 0)) {
+                6 => Uuid::v6(),
+                7 => Uuid::v7(),
+                default => Uuid::v4()
+            };
         }
         return $value;
     }
@@ -4187,7 +4100,7 @@ class DataHandler
                 ? $this->tcaSchemaFactory->get($v['table'])->isWorkspaceAware()
                 : false;
             // If language is set and differs from original record, this isn't a copy action but a localization of our parent/ancestor:
-            if ($language > 0 && $schema->isLanguageAware() && $language != $row[$schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName()]) {
+            if ($language > 0 && $schema->isLanguageAware() && $language != ($row[$schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName()] ?? 0)) {
                 // Children should be localized when the parent gets localized the first time, just do it:
                 $newId = $this->localize($v['table'], $v['id'], $language);
             } else {
@@ -4263,10 +4176,10 @@ class DataHandler
     public function copyRecord_flexFormCallBack($pParams, $dsConf, $dataValue, $_1, $_2, $workspaceOptions): array
     {
         // Extract parameters:
-        [$table, $uid, $field, $realDestPid] = $pParams;
+        [$table, $uid, $field, $realDestPid, $language] = $pParams;
         // If references are set for this field, set flag so they can be corrected later (in ->remapListedDBRecords())
         if (($this->isReferenceField($dsConf) || $this->getRelationFieldType($dsConf) !== false) && (string)$dataValue !== '') {
-            $dataValue = $this->copyRecord_procBasedOnFieldType($table, $uid, $field, $dataValue, [], $dsConf, $realDestPid, 0, $workspaceOptions);
+            $dataValue = $this->copyRecord_procBasedOnFieldType($table, $uid, $field, $dataValue, [], $dsConf, $realDestPid, $language, $workspaceOptions);
             $this->registerDBList[$table][$uid][$field] = 'FlexForm_reference';
         }
         // Return
@@ -4340,10 +4253,8 @@ class DataHandler
             $queryBuilder->setParameter('pointer', abs($destPid), Connection::PARAM_INT);
             $destL10nRecords = $queryBuilder->executeQuery()->fetchAllAssociative();
             // Index the localized record uids by language
-            if (is_array($destL10nRecords)) {
-                foreach ($destL10nRecords as $record) {
-                    $localizedDestPids[$record[$languageField]] = -$record['uid'];
-                }
+            foreach ($destL10nRecords as $record) {
+                $localizedDestPids[$record[$languageField]] = -$record['uid'];
             }
         }
         $languageSourceMap = [
@@ -4433,313 +4344,395 @@ class DataHandler
         }
     }
 
-    /*********************************************
-     *
-     * Cmd: Moving, Localizing
-     *
-     ********************************************/
     /**
-     * Moving single records
+     * Move a single record.
      *
-     * @param string $table Table name to move
-     * @param int $uid Record uid to move
-     * @param int $destPid Position to move to: $destPid: >=0 then it points to a page-id on which to insert the record (as the first element). <0 then it points to a uid from its own table after which to insert it (works if
+     * @param int $destination Position to move to. If >=0, then it points to a page uid on which to insert the
+     *                         record as the first element. If <0, then it points to an uid from its own table
+     *                         after which the record should be moved to.
      * @internal should only be used from within DataHandler
      */
-    public function moveRecord($table, $uid, $destPid): void
+    public function moveRecord(string $table, $uid, $destination): void
     {
-        if (!$this->tcaSchemaFactory->has($table)) {
+        $uid = (int)$uid;
+        $destination = (int)$destination;
+        if (!$this->tcaSchemaFactory->has($table) || $uid <= 0) {
             return;
         }
+        $schema = $this->tcaSchemaFactory->get($table);
 
-        // In case the record to be moved turns out to be an offline version,
-        // we have to find the live version and work on that one.
-        if ($lookForLiveVersion = BackendUtility::getLiveVersionOfRecord($table, $uid, 'uid')) {
-            $uid = $lookForLiveVersion['uid'];
+        $sortByFieldName = null;
+        if ($schema->hasCapability(TcaSchemaCapability::SortByField)) {
+            $sortByFieldName = $schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName();
+        } elseif ($destination < 0) {
+            // Trying to move a record *after* another one of the same table. Stop early if the table is not sorting-aware.
+            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record {table}:{uid} after another record, but the table does not support sorting', null, ['table' => $table, 'uid' => $uid]);
+            return;
         }
-        // Initialize:
-        $destPid = (int)$destPid;
-        // Get this before we change the pid (for logging)
-        $propArr = $this->getRecordProperties($table, $uid);
-        $moveRec = $this->getRecordProperties($table, $uid, true);
-        // This is the actual pid of the moving to destination
-        $resolvedPid = $this->resolvePid($table, $destPid);
-        // Finding out, if the record may be moved from where it is. If the record is a non-page, then it depends on edit-permissions.
-        // If the record is a page, then there are two options: If the page is moved within itself,
-        // (same pid) it's edit-perms of the pid. If moved to another place then its both delete-perms of the pid and new-page perms on the destination.
-        if ($table !== 'pages' || $resolvedPid == $moveRec['pid']) {
-            // Edit rights for the record...
-            $mayMoveAccess = $this->checkRecordUpdateAccess($table, $uid);
+        $pagesLocalizationParentFieldName = $this->tcaSchemaFactory->get('pages')->getCapability(TcaSchemaCapability::Language)->getTranslationOriginPointerField()->getName();
+        $tableLanguageFieldName = null;
+        if ($schema->hasCapability(TcaSchemaCapability::Language)) {
+            $tableLanguageFieldName = $schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName();
+        }
+
+        // Gather record facts
+        $plainRecord = BackendUtility::getRecord($table, $uid, '*', '', false);
+        if ($plainRecord === null) {
+            return;
+        }
+        $isTableWorkspaceAware = $schema->isWorkspaceAware();
+        $isMovingInWorkspaces = false;
+        if ($this->BE_USER->workspace > 0) {
+            $isMovingInWorkspaces = true;
+        }
+        if (!$isTableWorkspaceAware && (int)($plainRecord['t3ver_wsid'] ?? 0) > 0) {
+            // Moving record in a not workspace aware table, and the record is a workspace record. Broken record. Skip.
+            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'Attempt to move workspace record {table}:{uid} in not workspace aware table', null, ['table' => $table, 'uid' => $uid], $plainRecord['pid']);
+            return;
+        }
+        if (!$isMovingInWorkspaces && (int)($plainRecord['t3ver_wsid'] ?? 0) > 0) {
+            // Trying to move a workspace record while user is in live. For now, we'll log and skip.
+            // @todo: This seems to be fully unhandled right now: If a live workspace record is moved, we should
+            //        consider existing workspace overlays somehow. For instance, it would *probably* be good to move
+            //        an existing workspace overlay to a different page, when the live record is moved. There are various
+            //        edge cases we need to think about when doing this: What should happen if a live record is just resorted
+            //        on the same page? What if a live record is moved that has a workspace-moved overlay already? And what
+            //        if that move-overlay is a combination of "has first been changed, then turned into a move placeholder"?
+            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'Attempt to move workspace record {table}:{uid} and user is not in this workspace', null, ['table' => $table, 'uid' => $uid], $plainRecord['pid']);
+            return;
+        }
+        if ((int)($plainRecord['t3ver_wsid'] ?? 0) === 0 && (int)($plainRecord['t3ver_oid'] ?? 0) > 0) {
+            // Inconsistent combination: We have a live record with t3ver_oid not 0. Should not happen. This may be no
+            // hard problem and may be a result of some incomplete publish. We ignore it for now but log a warning.
+            // @todo: We may want to set such records to t3ver_oid=0 (and potentially t3ver_state=0) since they *are* live.
+            //        This is more a task of a general "repair" strategy (ext:dbdoctor), but details like this *may* be
+            //        involved at a central DH place when performing change operations to existing records?
+            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::WARNING, 'Moving live record {table}:{uid} while it has non zero t3ver_oid="{t3verOid}"', null, ['table' => $table, 'uid' => $uid, 't3verOid' => $plainRecord['t3ver_oid']], $plainRecord['pid']);
+        }
+        $liveRecord = null;
+        $workspaceRecord = null;
+        if ($isMovingInWorkspaces && !$isTableWorkspaceAware) {
+            // Moving a live record when user is in a workspace. Odd, but may happen. Permission checked below.
+            $liveRecord = $plainRecord;
+        } elseif ($isMovingInWorkspaces && (int)($plainRecord['t3ver_wsid'] === 0)) {
+            // We are in a workspace but got a move request for a live record uid. There may be an existing workspace overlay
+            // that should be moved instead. This is checked using BackendUtility::getWorkspaceVersionOfRecord(), which respects
+            // current user workspace. But it also returns a workspace row if the record is a "new placeholder" that has no live
+            // version. In this case, $liveRecord is kept null, but $workspaceRecord is set. Otherwise, both are set.
+            $potentialWorkspaceOverlay = BackendUtility::getWorkspaceVersionOfRecord($this->BE_USER->workspace, $table, $uid);
+            if ($potentialWorkspaceOverlay) {
+                $workspaceRecord = $potentialWorkspaceOverlay;
+                if (VersionState::tryFrom($potentialWorkspaceOverlay['t3ver_state']) !== VersionState::NEW_PLACEHOLDER) {
+                    // A live record is requested to be moved, and we have an overlay record as well.
+                    $liveRecord = $plainRecord;
+                }
+            } else {
+                // We are in workspace requesting to move a live record that has no overlay yet.
+                // This will create "move placeholder" records down below.
+                $liveRecord = $plainRecord;
+            }
+            // Do not work on $potentialWorkspaceOverlay anymore
+            unset($potentialWorkspaceOverlay);
+        } elseif ((int)($plainRecord['t3ver_wsid'] ?? 0) > 0) {
+            // Moving workspace overlay record
+            $workspaceRecord = $plainRecord;
+            if ((int)$workspaceRecord['t3ver_oid'] > 0) {
+                // The record is an overlay of a live record, the live record needs to exist. New workspace
+                // placeholder records have no live record and t3ver_oid=0, leaving $liveRecord unset.
+                $liveRecord = BackendUtility::getRecord($table, $workspaceRecord['t3ver_oid'], '*', '', false);
+                if (empty($liveRecord)) {
+                    $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'Attempt to move workspace overlay record {table}:{uid}, but live record {table}:{liveUid} not found', null, ['table' => $table, 'uid' => $uid, 'liveUid' => $workspaceRecord['t3ver_oid']], $workspaceRecord['pid']);
+                    return;
+                }
+            }
         } else {
-            $mayMoveAccess = $this->doesRecordExist($table, $uid, Permission::PAGE_DELETE);
+            // Moving a live record in live workspaces. There is no overlay.
+            $liveRecord = $plainRecord;
         }
-        // Finding out, if the record may be moved TO another place. Here we check insert-rights (non-pages = edit, pages = new),
-        // unless the pages are moved on the same pid, then edit-rights are checked
-        if ($table !== 'pages' || $resolvedPid != $moveRec['pid']) {
-            // Insert rights for the record...
-            $mayInsertAccess = $this->checkRecordInsertAccess($table, $resolvedPid, SystemLogDatabaseAction::MOVE);
+        // Do not work on these variables anymore
+        unset($plainRecord);
+        if ($liveRecord === null && $workspaceRecord === null) {
+            // If both are still null, some sanity and determination checks above are broken
+            throw new \RuntimeException('Could not determine live nor workspace record when moving', 1739389473);
+        }
+
+        // At this point we have:
+        // * $liveRecord set and $workspaceRecord is null: We're moving a live record.
+        // * $liveRecord null and $workspaceRecord is set: We're moving a "new placeholder", turning it into
+        //   a "move placeholder" if all goes well. The table is workspace aware.
+        // * $liveRecord set and $workspaceRecord set: We're moving an existing workspace overlay. The table
+        //   is workspace aware.
+
+        // Moving a workspace aware record in workspaces
+        if ($isMovingInWorkspaces && $workspaceRecord === null && $isTableWorkspaceAware) {
+            // Create version of record first, if it does not exist
+            // @todo: This strategy is odd. A "dummy" record is created in correct workspace, but it is a
+            //        DEFAULT_STATE one, not a MOVE_POINTER. This is then later updated to a move placeholder.
+            //        This is complex and risky, we can for instance end up with a dangling record when a
+            //        permission check fails down below. Next issue is that versionizeRecord() does
+            //        a lot of stuff that we checked above already, but we can't change versionizeRecord()
+            //        much since it is also used as entry method in process_cmdmap().
+            //        In the end, we should refactor this to fully prepare the workspace record and insert it once.
+            $sourceUid = $this->versionizeRecord($table, $liveRecord['uid'], 'MovePointer');
+            if (!$sourceUid) {
+                // If versionizeRecord() could not create, it usually logs.
+                return;
+            }
+            $workspaceRecord = BackendUtility::getRecord($table, $sourceUid);
+            if ($workspaceRecord === null) {
+                throw new \RuntimeException('Table ' . $table . ' is workspace aware, but could not create workspace overlay', 1740217183);
+            }
+        }
+
+        $sourceUid = (int)($workspaceRecord['uid'] ?? $liveRecord['uid']);
+        $sourcePid = (int)($workspaceRecord['pid'] ?? $liveRecord['pid']);
+        $sourcePageRecord = $table === 'pages'
+            ? (BackendUtility::getRecord('pages', $sourceUid) ?? [])
+            : (BackendUtility::getRecord('pages', $sourcePid) ?? []);
+
+        $updateFields = [];
+        $oldData = [
+            'pid' => $workspaceRecord['pid'] ?? $liveRecord['pid'],
+        ];
+        if ($schema->hasCapability(TcaSchemaCapability::UpdatedAt)) {
+            $updatedAtFieldName = $schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName();
+            $updateFields[$updatedAtFieldName] = $GLOBALS['EXEC_TIME'];
+            $oldData[$updatedAtFieldName] = $workspaceRecord[$updatedAtFieldName] ?? $liveRecord[$updatedAtFieldName];
+        }
+        if ($sortByFieldName) {
+            $oldData[$sortByFieldName] = $workspaceRecord[$sortByFieldName] ?? $liveRecord[$sortByFieldName];
+        }
+        if ($table === 'pages' && (int)($workspaceRecord[$pagesLocalizationParentFieldName] ?? $liveRecord[$pagesLocalizationParentFieldName]) > 0) {
+            // If this is a translation of a page sorting and pid is kept in sync with default language record.
+            // Also in workspaces, the default language page may have been moved to a different pid than the
+            // default language page record of live workspace. In this case, localized pages need to be
+            // moved to the pid of the workspace move record, which is why we use getRecord() and workspaceOL() here.
+            $defaultLanguagePageRecord = BackendUtility::getRecord('pages', (int)($workspaceRecord[$pagesLocalizationParentFieldName] ?? $liveRecord[$pagesLocalizationParentFieldName]));
+            BackendUtility::workspaceOL('pages', $defaultLanguagePageRecord, $this->BE_USER->workspace);
+
+            if (is_array($defaultLanguagePageRecord)) {
+                $updateFields[$sortByFieldName] = $defaultLanguagePageRecord[$sortByFieldName];
+                $updateFields['pid'] = $defaultLanguagePageRecord['pid'];
+            }
+        } elseif ($sortByFieldName) {
+            // Calculate new "sort number" depending on weather the record is inserted as first record, or below another one.
+            $sortNumber = $this->getSortNumber($table, $sourceUid, $destination);
+            if ($sortNumber === false) {
+                // Unable to calculate sort number, logged in getSortNumber() already.
+                return;
+            }
+            if ($destination >= 0) {
+                $updateFields[$sortByFieldName] = $sortNumber;
+                $updateFields['pid'] = $destination;
+            } else {
+                $updateFields[$sortByFieldName] = $sortNumber['sortNumber'];
+                $updateFields['pid'] = $sortNumber['pid'];
+            }
         } else {
-            $mayInsertAccess = $this->checkRecordUpdateAccess($table, $uid);
+            $updateFields['pid'] = $destination;
         }
-        // Checking if there is anything else disallowing moving the record by checking if editing is allowed
-        $fullLanguageCheckNeeded = $table !== 'pages';
-        $mayEditAccess = $this->BE_USER->recordEditAccessInternals($table, $uid, false, false, $fullLanguageCheckNeeded);
-        // If moving is allowed, begin the processing:
-        if (!$mayEditAccess) {
-            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record "{title}" ({table}:{uid}) without having permissions to do so [{reason}]', 14, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'reason' => $this->BE_USER->errorMsg], $propArr['event_pid']);
+
+        $isMovingToDifferentPid = false;
+        $targetPageRecord = $sourcePageRecord;
+        if ($updateFields['pid'] !== $sourcePid) {
+            $isMovingToDifferentPid = true;
+            $targetPageRecord = BackendUtility::getRecord('pages', $updateFields['pid']) ?? [];
+        }
+
+        if ($table === 'pages') {
+            if ($isMovingToDifferentPid) {
+                if (!$this->destNotInsideSelf($updateFields['pid'], $sourceUid)) {
+                    // When page is moved to a different pid, it must not be a child of itself
+                    $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move pages:{uid} to inside of its own rootline', null, ['uid' => $sourceUid]);
+                    return;
+                }
+                if (!$this->hasPagePermission(Permission::PAGE_DELETE, $sourcePageRecord)) {
+                    // When page is moved to a different parent page, delete permissions are needed for the source page
+                    $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move page {table}:{uid} without having permissions to do so', null, ['table' => $table, 'uid' => $sourceUid], $sourcePid);
+                    return;
+                }
+                if (!$this->hasPermissionToInsert($table, $updateFields['pid'], $targetPageRecord)) {
+                    // When page moved to different target, insert permissions are needed
+                    $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record {table}:{uid} to pid "{targetPid}" without having permissions to insert', null, ['table' => $table, 'uid' => $sourceUid, 'targetPid' => $updateFields['pid']], $updateFields['pid']);
+                    return;
+                }
+            } else {
+                if (!$this->hasPermissionToUpdate($table, $sourcePageRecord)) {
+                    // When page is moved within same parent page, page edit records are needed
+                    $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record {table}:{uid} without having permissions to update', null, ['table' => $table, 'uid' => $sourceUid], $sourcePid);
+                    return;
+                }
+            }
+        } else {
+            if ($isMovingToDifferentPid) {
+                if (!$this->hasPermissionToInsert($table, $updateFields['pid'], $targetPageRecord)) {
+                    // When record is moved to different page, insert permissions on target are needed
+                    $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record {table}:{uid} to pid "{targetPid}" without having permissions to insert', null, ['table' => $table, 'uid' => $sourceUid, 'targetPid' => $updateFields['pid']], $updateFields['pid']);
+                    return;
+                }
+            } else {
+                if (!$this->hasPermissionToUpdate($table, $sourcePageRecord)) {
+                    // When record is moved within same page, edit records are needed
+                    $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record {table}:{uid} without having permissions to update', null, ['table' => $table, 'uid' => $sourceUid], $sourcePid);
+                    return;
+                }
+            }
+        }
+        if (!$this->BE_USER->recordEditAccessInternals($table, $liveRecord ?? $workspaceRecord, false, null, $table !== 'pages')) {
+            // Check if anything else disallows the move operation
+            $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record {table}:{uid} without having permissions to do so [{reason}]', null, ['table' => $table, 'uid' => $sourceUid, 'reason' => $this->BE_USER->errorMsg], $sourcePid);
             return;
         }
 
-        if (!$mayMoveAccess) {
-            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record "{title}" ({table}:{uid}) without having permissions to do so', 14, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid], $propArr['event_pid']);
-            return;
-        }
-
-        if (!$mayInsertAccess) {
-            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record "{title}" ({table}:{uid}) without having permissions to insert', 14, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid], $propArr['event_pid']);
+        if ($isMovingInWorkspaces && !$isTableWorkspaceAware && !$this->BE_USER->workspaceAllowsLiveEditingInTable($table)) {
+            // Moving a not workspace aware record while in workspaces, but user, table TCA or sys_workspace record do not allow live editing this table.
+            // Can happen when moving a workspace aware parent record with children not being workspace aware.
+            // @todo: See DataScenarios/IrreForeignFieldNonWs/WorkspacesModify/ActionTest.php for a rough overview on what is broken in this case.
+            // @todo: This means the parent record *is* moved (gets a move placeholder), while children are not.
+            //        This is fine when only resorting parent on the same page. Its problematic when parent is moved
+            //        to a different page since the child stays on the old page. It is also unclear what happens when
+            //        the parent is later published (should children *then* be moved to recreate integrity?). At
+            //        the moment, the workspace BE module crashes when doing this.
+            // @todo: If allowed, moving the live record ist still probably not a good idea since this may break live when
+            //        inline children are moved to a different page while the live parent record is on the "old" page.
+            //        It is not an issue with inline children when parent is only resorted on the same page.
+            $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move {table}:{uid} in workspace but the table is not workspace aware and live editing is denied', null, ['table' => $table, 'uid' => (int)$liveRecord['uid']]);
             return;
         }
 
         $recordWasMoved = false;
-        // Move the record via a hook, used e.g. for versioning
-        foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['moveRecordClass'] ?? [] as $className) {
-            $hookObj = GeneralUtility::makeInstance($className);
-            if (method_exists($hookObj, 'moveRecord')) {
-                /** @var bool $recordWasMoved */
-                $hookObj->moveRecord($table, $uid, $destPid, $propArr, $moveRec, $resolvedPid, $recordWasMoved, $this);
-            }
-        }
-        // Move the record if a hook hasn't moved it yet
-        if (!$recordWasMoved) {
-            $this->moveRecord_raw($table, $uid, $destPid);
-        }
-    }
-
-    /**
-     * Moves a record without checking security of any sort.
-     * USE ONLY INTERNALLY
-     *
-     * @param string $table Table name to move
-     * @param int $uid Record uid to move
-     * @param int $destPid Position to move to: $destPid: >=0 then it points to a page-id on which to insert the record (as the first element). <0 then it points to a uid from its own table after which to insert it (works if
-     * @see moveRecord()
-     * @internal should only be used from within DataHandler
-     */
-    public function moveRecord_raw($table, $uid, $destPid): void
-    {
-        $schema = $this->tcaSchemaFactory->get($table);
-        $origDestPid = $destPid;
-        // This is the actual pid of the moving to destination
-        $resolvedPid = $this->resolvePid($table, $destPid);
-        // Checking if the pid is negative, but no sorting row is defined. In that case, find the correct pid.
-        // Basically this check make the error message 4-13 meaning less... But you can always remove this check if you
-        // prefer the error instead of a no-good action (which is to move the record to its own page...)
-        if (($destPid < 0 && !$schema->hasCapability(TcaSchemaCapability::SortByField)) || $destPid >= 0) {
-            $destPid = $resolvedPid;
-        }
-        // Get this before we change the pid (for logging)
-        $propArr = $this->getRecordProperties($table, $uid);
-        $moveRec = $this->getRecordProperties($table, $uid, true);
-        // Prepare user defined objects (if any) for hooks which extend this function:
-        $hookObjectsArr = [];
-        foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['moveRecordClass'] ?? [] as $className) {
-            $hookObjectsArr[] = GeneralUtility::makeInstance($className);
-        }
-        // Timestamp field:
-        $updateFields = [];
-        if ($schema->hasCapability(TcaSchemaCapability::UpdatedAt)) {
-            $updateFields[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
-        }
-
-        // Check if this is a translation of a page, if so then it just needs to be kept "sorting" in sync
-        // Usually called from moveL10nOverlayRecords()
-        if ($table === 'pages') {
-            $defaultLanguagePageUid = $this->getDefaultLanguagePageId((int)$uid);
-            // In workspaces, the default language page may have been moved to a different pid than the
-            // default language page record of live workspace. In this case, localized pages need to be
-            // moved to the pid of the workspace move record.
-            $defaultLanguagePageWorkspaceOverlay = BackendUtility::getWorkspaceVersionOfRecord((int)$this->BE_USER->workspace, 'pages', $defaultLanguagePageUid, 'uid');
-            if (is_array($defaultLanguagePageWorkspaceOverlay)) {
-                $defaultLanguagePageUid = (int)$defaultLanguagePageWorkspaceOverlay['uid'];
-            }
-            if ($defaultLanguagePageUid !== (int)$uid) {
-                // If the default language page has been moved, localized pages need to be moved to
-                // that pid and sorting, too.
-                $originalTranslationRecord = $this->recordInfo($table, $defaultLanguagePageUid);
-                $updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()] = $originalTranslationRecord[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()];
-                $destPid = $originalTranslationRecord['pid'];
-            }
-        }
-
-        // Insert as first element on page (where uid = $destPid)
-        if ($destPid >= 0) {
-            if ($table !== 'pages' || $this->destNotInsideSelf($destPid, $uid)) {
-                // Clear cache before moving
-                [$parentUid] = BackendUtility::getTSCpid($table, $uid, '');
-                $this->registerRecordIdForPageCacheClearing($table, $uid, $parentUid);
-                // Setting PID
-                $updateFields['pid'] = $destPid;
-                // Table is sorted by 'sortby'
-                if ($schema->hasCapability(TcaSchemaCapability::SortByField) && !isset($updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()])) {
-                    $sortNumber = $this->getSortNumber($table, $uid, $destPid);
-                    $updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()] = $sortNumber;
+        $recordTitle = BackendUtility::getRecordTitle($table, $workspaceRecord ?? $liveRecord);
+        $moveRec = [
+            'header' => $recordTitle,
+            'pid' => (int)($liveRecord['pid'] ?? $workspaceRecord['pid']),
+            'event_pid' => $table === 'pages'
+                ? (int)(($liveRecord['t3ver_oid'] ?? null) ?: ($liveRecord['uid'] ?? $workspaceRecord['uid']))
+                : (int)($liveRecord['pid'] ?? $workspaceRecord['pid']),
+            't3ver_state' => ($liveRecord['t3ver_state'] ?? $workspaceRecord['t3ver_state'] ?? 0),
+        ];
+        if (!empty($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['moveRecordClass'] ?? [])) {
+            // Extensive hook argument handling for b/w compatibility
+            $propArr = [
+                'header' => $recordTitle,
+                'pid' => $sourcePid,
+                'event_pid' => $table === 'pages'
+                    ? ((int)($workspaceRecord['t3ver_oid'] ?? null) ?: $liveRecord['uid'] ?? $workspaceRecord['uid'])
+                    : $sourcePid,
+                't3ver_state' => $workspaceRecord['t3ver_state'] ?? $liveRecord['t3ver_state'] ?? 0,
+            ];
+            foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['moveRecordClass'] ?? [] as $className) {
+                $hook = GeneralUtility::makeInstance($className);
+                if (method_exists($hook, 'moveRecord')) {
+                    $hook->moveRecord($table, $liveRecord['uid'] ?? $workspaceRecord['uid'], $destination, $propArr, $moveRec, $updateFields['pid'], $recordWasMoved, $this);
+                    /** @var bool $recordWasMoved */
                 }
-                // Check for child records that have also to be moved
-                $this->moveRecord_procFields($table, $uid, $destPid);
-                // Create query for update:
-                $this->connectionPool->getConnectionForTable($table)
-                    ->update($table, $updateFields, ['uid' => (int)$uid]);
-                // Check for the localizations of that element
-                $this->moveL10nOverlayRecords($table, $uid, $destPid, $destPid);
-                // Call post-processing hooks:
-                foreach ($hookObjectsArr as $hookObj) {
-                    if (method_exists($hookObj, 'moveRecord_firstElementPostProcess')) {
-                        $hookObj->moveRecord_firstElementPostProcess($table, $uid, $destPid, $moveRec, $updateFields, $this);
-                    }
-                }
-
-                $this->getRecordHistoryStore()->moveRecord($table, $uid, ['oldPageId' => $propArr['pid'], 'newPageId' => $destPid, 'oldData' => $propArr, 'newData' => $updateFields], $this->correlationId);
-                if ($this->enableLogging) {
-                    // Logging...
-                    $oldpagePropArr = $this->getRecordProperties('pages', $propArr['pid']);
-                    if ($destPid != $propArr['pid']) {
-                        // Logged to old page
-                        $newPropArr = $this->getRecordProperties($table, $uid);
-                        $newpagePropArr = $this->getRecordProperties('pages', $destPid);
-                        $this->log($table, $uid, SystemLogDatabaseAction::MOVE, $destPid, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) to page "{pageTitle}" ({pid})', 2, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $newpagePropArr['header'], 'pid' => $newPropArr['pid']], $propArr['pid']);
-                        // Logged to new page
-                        $this->log($table, $uid, SystemLogDatabaseAction::MOVE, $destPid, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) from page "{pageTitle}" ({pid}))', 3, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $oldpagePropArr['header'], 'pid' => $propArr['pid']], $destPid);
-                    } else {
-                        // Logged to new page
-                        $this->log($table, $uid, SystemLogDatabaseAction::MOVE, $destPid, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) on page "{pageTitle}" ({pid})', 4, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $oldpagePropArr['header'], 'pid' => $propArr['pid']], $destPid);
-                    }
-                }
-                // Clear cache after moving
-                $this->registerRecordIdForPageCacheClearing($table, $uid);
-                $this->fixUniqueInPid($table, $uid);
-                $this->fixUniqueInSite($table, (int)$uid);
-                if ($table === 'pages') {
-                    $this->fixUniqueInSiteForSubpages((int)$uid);
-                }
-            } elseif ($this->enableLogging) {
-                $destPropArr = $this->getRecordProperties('pages', $destPid);
-                $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to move page "{title}" ({uid}) to inside of its own rootline (at page "{pageTitle}" ({pid}))', 10, ['title' => $propArr['header'], 'uid' => $uid, 'pageTitle' => $destPropArr['header'], 'pid' => $destPid], $propArr['pid']);
-            }
-        } elseif ($schema->hasCapability(TcaSchemaCapability::SortByField)) {
-            // Put after another record
-            // Table is being sorted
-            // Save the position to which the original record is requested to be moved
-            $originalRecordDestinationPid = $destPid;
-            $sortInfo = $this->getSortNumber($table, $uid, $destPid);
-            // If not an array, there was an error (which is already logged)
-            if (is_array($sortInfo)) {
-                // Setting the destPid to the new pid of the record.
-                $destPid = $sortInfo['pid'];
-                if ($table !== 'pages' || $this->destNotInsideSelf($destPid, $uid)) {
-                    // clear cache before moving
-                    $this->registerRecordIdForPageCacheClearing($table, $uid);
-                    // We now update the pid and sortnumber (if not set for page translations)
-                    $updateFields['pid'] = $destPid;
-                    if (!isset($updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()])) {
-                        $updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()] = $sortInfo['sortNumber'];
-                    }
-                    // Check for child records that have also to be moved
-                    $this->moveRecord_procFields($table, $uid, $destPid);
-                    // Create query for update:
-                    $this->connectionPool->getConnectionForTable($table)
-                        ->update($table, $updateFields, ['uid' => (int)$uid]);
-                    // Check for the localizations of that element
-                    $this->moveL10nOverlayRecords($table, $uid, $destPid, $originalRecordDestinationPid);
-                    // Call post-processing hooks:
-                    foreach ($hookObjectsArr as $hookObj) {
-                        if (method_exists($hookObj, 'moveRecord_afterAnotherElementPostProcess')) {
-                            $hookObj->moveRecord_afterAnotherElementPostProcess($table, $uid, $destPid, $origDestPid, $moveRec, $updateFields, $this);
-                        }
-                    }
-                    $this->getRecordHistoryStore()->moveRecord($table, $uid, ['oldPageId' => $propArr['pid'], 'newPageId' => $destPid, 'oldData' => $propArr, 'newData' => $updateFields], $this->correlationId);
-                    if ($this->enableLogging) {
-                        // Logging...
-                        $oldpagePropArr = $this->getRecordProperties('pages', $propArr['pid']);
-                        if ($destPid != $propArr['pid']) {
-                            // Logged to old page
-                            $newPropArr = $this->getRecordProperties($table, $uid);
-                            $newpagePropArr = $this->getRecordProperties('pages', $destPid);
-                            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) to page "{pageTitle}" ({pid})', 2, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $newpagePropArr['header'], 'pid' => $newPropArr['pid']], $propArr['pid']);
-                            // Logged to old page
-                            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) from page "{pageTitle}" ({pid})', 3, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $oldpagePropArr['header'], 'pid' => $propArr['pid']], $destPid);
-                        } else {
-                            // Logged to old page
-                            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) on page "{pageTitle}" ({pid})', 4, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $oldpagePropArr['header'], 'pid' => $propArr['pid']], $destPid);
-                        }
-                    }
-                    // Clear cache after moving
-                    $this->registerRecordIdForPageCacheClearing($table, $uid);
-                    $this->fixUniqueInPid($table, $uid);
-                    $this->fixUniqueInSite($table, (int)$uid);
-                    if ($table === 'pages') {
-                        $this->fixUniqueInSiteForSubpages((int)$uid);
-                    }
-                } elseif ($this->enableLogging) {
-                    $destPropArr = $this->getRecordProperties('pages', $destPid);
-                    $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to move page "{title}" ({uid}) to inside of its own rootline (at page "{pageTitle}" [{pid}])', 10, ['title' => $propArr['header'], 'uid' => $uid, 'pageTitle' => $destPropArr['header'], 'pid' => $destPid], $propArr['pid']);
-                }
-            } else {
-                $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record "{title}" ({table}:{uid}) to after another record, although the table has no sorting row', 13, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid], $propArr['event_pid']);
             }
         }
-    }
-
-    /**
-     * Walk through all fields of the moved record and look for children of e.g. the inline type.
-     * If child records are found, they are also move to the new $destPid.
-     *
-     * @param string $table Record Table
-     * @param int $uid Record UID
-     * @param int $destPid Position to move to
-     * @internal should only be used from within DataHandler
-     */
-    public function moveRecord_procFields($table, $uid, $destPid): void
-    {
-        $row = BackendUtility::getRecordWSOL($table, $uid);
-        if (is_array($row) && (int)$destPid !== (int)$row['pid']) {
-            $schema = $this->tcaSchemaFactory->get($table);
-            foreach ($row as $field => $value) {
-                $conf = $schema->hasField($field) ? $schema->getField($field)->getConfiguration() : [];
-                $this->moveRecord_procBasedOnFieldType($table, $uid, $destPid, $value, $conf);
-            }
-        }
-    }
-
-    /**
-     * Move child records depending on the field type of the parent record.
-     *
-     * @param string $table Record Table
-     * @param int $uid Record UID
-     * @param int $destPid Position to move to
-     * @param string $value Record field value
-     * @param array $conf TCA configuration of current field
-     * @internal should only be used from within DataHandler
-     */
-    public function moveRecord_procBasedOnFieldType($table, $uid, $destPid, $value, $conf): void
-    {
-        if (($conf['behaviour']['disableMovingChildrenWithParent'] ?? false)
-            || !in_array($this->getRelationFieldType($conf), ['list', 'field'], true)
-        ) {
+        if ($recordWasMoved) {
+            // Return if a hook handled move
             return;
         }
 
-        if ($table === 'pages') {
-            // If the relations are related to a page record, make sure they reside at that page and not at its parent
-            $destPid = $uid;
+        if ($table !== 'pages' && $isMovingToDifferentPid) {
+            // When moving a record to a different pid, attached children have to be moved as well.
+            foreach (($workspaceRecord ?? $liveRecord) as $field => $value) {
+                $fieldConfig = $schema->hasField($field) ? $schema->getField($field)->getConfiguration() : [];
+                if (!($fieldConfig['behaviour']['disableMovingChildrenWithParent'] ?? false)
+                    && in_array($this->getRelationFieldType($fieldConfig), ['list', 'field'], true)
+                ) {
+                    // Move non-MM inline children
+                    $dbAnalysis = $this->createRelationHandlerInstance();
+                    $dbAnalysis->start($value, $fieldConfig['foreign_table'], '', $sourceUid, $table, $fieldConfig);
+                    // Moving records to a positive destination will insert each record at the beginning, thus the order is reversed here
+                    foreach (array_reverse($dbAnalysis->itemArray) as $item) {
+                        $this->moveRecord($item['table'], (int)$item['id'], $table === 'pages' ? $sourceUid : $updateFields['pid']);
+                    }
+                    continue;
+                }
+                if (($fieldConfig['type'] ?? '') === 'flex' && !empty($value)) {
+                    // Children attached to flex inline fields have to be moved to new pid along with their parent record
+                    try {
+                        $fieldConfig['config'] = $fieldConfig;
+                        $dataStructureIdentifier = $this->flexFormTools->getDataStructureIdentifier($fieldConfig, $table, $field, $workspaceRecord ?? $liveRecord);
+                        $dataStructure = $this->flexFormTools->parseDataStructureByIdentifier($dataStructureIdentifier);
+                        $flexFormValueParsed = GeneralUtility::xml2array($value);
+                    } catch (AbstractInvalidDataStructureException) {
+                        // Nothing to do if data structure could not be determined
+                        continue;
+                    }
+                    foreach ($dataStructure['sheets'] as $sheetName => $sheet) {
+                        foreach (($sheet['ROOT']['el'] ?? []) as $sheetFieldName => $sheetFieldConfig) {
+                            if (!($sheetFieldConfig['config']['behaviour']['disableMovingChildrenWithParent'] ?? false)
+                                && in_array($this->getRelationFieldType($sheetFieldConfig['config']), ['list', 'field'], true)
+                            ) {
+                                // Move existing non-MM inline flex children
+                                $dbAnalysis = $this->createRelationHandlerInstance();
+                                $dbAnalysis->start($flexFormValueParsed['data'][$sheetName]['lDEF'][$sheetFieldName]['vDEF'] ?? '', $sheetFieldConfig['config']['foreign_table'], '', $sourceUid, $table, $sheetFieldConfig['config']);
+                                foreach (array_reverse($dbAnalysis->itemArray) as $item) {
+                                    $this->moveRecord($item['table'], (int)$item['id'], $table === 'pages' ? $sourceUid : $updateFields['pid']);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        $dbAnalysis = $this->createRelationHandlerInstance();
-        $dbAnalysis->start($value, $conf['foreign_table'], '', $uid, $table, $conf);
+        $this->registerRecordIdForPageCacheClearing($table, $sourceUid, $table === 'pages' ? $workspaceRecord['uid'] ?? $liveRecord['uid'] : $workspaceRecord['pid'] ?? $liveRecord['pid']);
+        $this->connectionPool->getConnectionForTable($table)->update($table, $updateFields, ['uid' => $sourceUid]);
+        if ($tableLanguageFieldName && (int)($workspaceRecord[$tableLanguageFieldName] ?? $liveRecord[$tableLanguageFieldName]) === 0) {
+            $this->moveL10nOverlayRecords($table, $sourceUid, $updateFields['pid'], $destination);
+        }
+        if ($destination >= 0) {
+            foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['moveRecordClass'] ?? [] as $className) {
+                $hook = GeneralUtility::makeInstance($className);
+                if (method_exists($hook, 'moveRecord_firstElementPostProcess')) {
+                    $hook->moveRecord_firstElementPostProcess($table, $sourceUid, $destination, $moveRec, $updateFields, $this);
+                }
+            }
+        } else {
+            foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['moveRecordClass'] ?? [] as $className) {
+                $hook = GeneralUtility::makeInstance($className);
+                if (method_exists($hook, 'moveRecord_afterAnotherElementPostProcess')) {
+                    $hook->moveRecord_afterAnotherElementPostProcess($table, $sourceUid, $updateFields['pid'], $destination, $moveRec, $updateFields, $this);
+                }
+            }
+        }
+        $this->getRecordHistoryStore()->moveRecord($table, $sourceUid, ['oldData' => $oldData, 'newData' => $updateFields], $this->correlationId);
+        if ($isMovingToDifferentPid) {
+            $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record {table}:{uid} to page {pid}', null, ['table' => $table, 'uid' => $sourceUid, 'pid' => $updateFields['pid']], $workspaceRecord['pid'] ?? $liveRecord['pid']);
+            $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record {table}:{uid} from page {pid}', null, ['table' => $table, 'uid' => $sourceUid, 'pid' => $workspaceRecord['pid'] ?? $liveRecord['pid']], $updateFields['pid']);
+        } else {
+            $this->log($table, $sourceUid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record {table}:{uid} on page {pid}', null, ['table' => $table, 'uid' => $sourceUid, 'pid' => $updateFields['pid']], $updateFields['pid']);
+        }
+        $this->fixUniqueInPid($table, $workspaceRecord ?? $liveRecord);
+        $this->fixUniqueInSite($table, $workspaceRecord ?? $liveRecord);
+        if ($table === 'pages') {
+            $this->fixUniqueInSiteForSubpages($sourceUid);
+        }
 
-        // Moving records to a positive destination will insert each
-        // record at the beginning, thus the order is reversed here:
-        foreach (array_reverse($dbAnalysis->itemArray) as $item) {
-            $this->moveRecord($item['table'], $item['id'], $destPid);
+        if ($isMovingInWorkspaces && $isTableWorkspaceAware && VersionState::tryFrom((int)($workspaceRecord['t3ver_state'])) !== VersionState::NEW_PLACEHOLDER) {
+            // Late changes after moveRecord_raw() moved stuff in workspaces.
+            // This is a "changed", "deleted" or "already moved" record.
+            if (VersionState::tryFrom($workspaceRecord['t3ver_state']) !== VersionState::DELETE_PLACEHOLDER) {
+                // Update the state of this record to a move placeholder. This is allowed if the
+                // record is a 'changed' (t3ver_state=0) record: Changing a record and moving it
+                // around later, should switch it from 'changed' to 'moved'. Deleted placeholders
+                // however are an 'end-state', they should not be switched to a move placeholder.
+                // Scenario: For a live page that has a localization, the localization is first
+                // marked as to-delete in workspace, creating a delete placeholder for that
+                // localization. Later, the page is moved around, moving the localization along
+                // with the default language record. The localization should then NOT be switched
+                // from 'to-delete' to 'moved', this would lose the 'to-delete' information.
+                $this->connectionPool->getConnectionForTable($table)->update(
+                    $table,
+                    ['t3ver_state' => VersionState::MOVE_POINTER->value],
+                    ['uid' => $sourceUid]
+                );
+            }
+            // Check for the localizations of that element and move them as well
+            // @todo: Why is this not done with "new"? Fishy. Called at different place or no test coverage?
+            $this->moveL10nOverlayRecords($table, $liveRecord['uid'] ?? $workspaceRecord['uid'], $destination, $destination);
         }
     }
 
@@ -4752,55 +4745,51 @@ class DataHandler
      * @param int $originalRecordDestinationPid Position to move the original record to
      * @internal should only be used from within DataHandler
      */
-    public function moveL10nOverlayRecords($table, $uid, $destPid, $originalRecordDestinationPid): void
+    public function moveL10nOverlayRecords(string $table, $uid, $destPid, $originalRecordDestinationPid): void
     {
+        $destPid = (int)$destPid;
         $schema = $this->tcaSchemaFactory->get($table);
         // There's no need to perform this for non-localizable tables
         if (!$schema->isLanguageAware()) {
             return;
         }
+        /** @var LanguageAwareSchemaCapability $languageCapability */
+        $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
+        $languageField = $languageCapability->getLanguageField()->getName();
+        $transOrigPointerFieldName = $languageCapability->getTranslationOriginPointerField()->getName();
 
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
         $queryBuilder->getRestrictions()->removeAll()
             ->add(GeneralUtility::makeInstance(DeletedRestriction::class))
             ->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, $this->BE_USER->workspace));
 
-        /** @var LanguageAwareSchemaCapability $languageCapability */
-        $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
-        $languageField = $languageCapability->getLanguageField()->getName();
-        $l10nRecords = $queryBuilder->select('*')
+        $l10nRecords = $queryBuilder->select('uid', $languageField)
             ->from($table)
             ->where(
-                $queryBuilder->expr()->eq(
-                    $languageCapability->getTranslationOriginPointerField()->getName(),
-                    $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT, ':pointer')
-                )
+                $queryBuilder->expr()->eq($transOrigPointerFieldName, $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT, ':pointer'))
             )
             ->executeQuery()
             ->fetchAllAssociative();
 
-        if (is_array($l10nRecords)) {
-            $localizedDestPids = [];
-            // If $$originalRecordDestinationPid < 0, then it is the uid of the original language record we are inserting after
-            if ($originalRecordDestinationPid < 0) {
-                // Get the localized records of the record we are inserting after
-                $queryBuilder->setParameter('pointer', abs($originalRecordDestinationPid), Connection::PARAM_INT);
-                $destL10nRecords = $queryBuilder->executeQuery()->fetchAllAssociative();
-                // Index the localized record uids by language
-                if (is_array($destL10nRecords)) {
-                    foreach ($destL10nRecords as $record) {
-                        $localizedDestPids[$record[$languageField]] = -$record['uid'];
-                    }
-                }
+        $localizedDestPids = [];
+        if ($originalRecordDestinationPid < 0) {
+            // If $originalRecordDestinationPid < 0, then it is the uid of the original language record we are inserting after
+            // Get the localized records of the record we are inserting after
+            $queryBuilder->setParameter('pointer', abs($originalRecordDestinationPid), Connection::PARAM_INT);
+            $destL10nRecords = $queryBuilder->executeQuery()->fetchAllAssociative();
+            // Index the localized record uids by language
+            foreach ($destL10nRecords as $record) {
+                $localizedDestPids[$record[$languageField]] = -$record['uid'];
             }
-            // Move the localized records after the corresponding localizations of the destination record
-            foreach ($l10nRecords as $record) {
-                $localizedDestPid = (int)($localizedDestPids[$record[$languageField]] ?? 0);
-                if ($localizedDestPid < 0) {
-                    $this->moveRecord($table, $record['uid'], $localizedDestPid);
-                } else {
-                    $this->moveRecord($table, $record['uid'], $destPid);
-                }
+        }
+
+        // Move the localized records after the corresponding localizations of the destination record
+        foreach ($l10nRecords as $record) {
+            $localizedDestPid = (int)($localizedDestPids[$record[$languageField]] ?? 0);
+            if ($localizedDestPid < 0) {
+                $this->moveRecord($table, (int)$record['uid'], $localizedDestPid);
+            } else {
+                $this->moveRecord($table, (int)$record['uid'], $destPid);
             }
         }
     }
@@ -4825,7 +4814,7 @@ class DataHandler
         $schema = $this->tcaSchemaFactory->get($table);
         $this->registerNestedElementCall($table, $uid, 'localize-' . (string)$language);
         if (!$schema->isLanguageAware()) {
-            $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Localization failed; "languageField" and "transOrigPointerField" must be defined for the table {table}', -1, ['table' => $table]);
+            $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, null, SystemLogErrorClassification::USER_ERROR, 'Localization failed; "languageField" and "transOrigPointerField" must be defined for the table {table}', null, ['table' => $table]);
             return false;
         }
 
@@ -4834,15 +4823,27 @@ class DataHandler
         $languageFieldName = $languageCapability->getLanguageField()->getName();
         $translationOriginPointerFieldName = $languageCapability->getTranslationOriginPointerField()->getName();
 
-        if (!$this->doesRecordExist($table, $uid, Permission::PAGE_SHOW)) {
-            $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to localize record {table}:{uid} without permission', -1, ['table' => $table, 'uid' => (int)$uid]);
+        // Getting workspace overlay if possible - this will localize versions in workspace if any
+        $row = BackendUtility::getRecord($table, $uid);
+        BackendUtility::workspaceOL($table, $row, $this->BE_USER->workspace);
+        if (!is_array($row)) {
+            $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to localize record {table}:{uid} that did not exist', null, ['table' => $table, 'uid' => (int)$uid]);
             return false;
         }
-
-        // Getting workspace overlay if possible - this will localize versions in workspace if any
-        $row = BackendUtility::getRecordWSOL($table, $uid);
-        if (!is_array($row)) {
-            $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to localize record {table}:{uid} that did not exist', -1, ['table' => $table, 'uid' => (int)$uid]);
+        $pageRecord = [];
+        if ($table === 'pages') {
+            $pageRecord = $row;
+        } elseif ((int)$row['pid'] > 0) {
+            $pageRecord = BackendUtility::getRecord('pages', $row['pid']);
+            if (!is_array($pageRecord)) {
+                $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to localize record "{table}:{uid}" which is not assigned to a valid page', null, ['table' => $table, 'uid' => (int)$uid]);
+                return false;
+            }
+        }
+        if (($pageRecord === [] && $row['pid'] === 0 && !($this->admin || BackendUtility::isRootLevelRestrictionIgnored($table)))
+            || (($pageRecord !== [] || $row['pid'] !== 0) && !$this->hasPagePermission(Permission::PAGE_SHOW, $pageRecord))
+        ) {
+            $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to localize record {table}:{uid} without permission', null, ['table' => $table, 'uid' => (int)$uid]);
             return false;
         }
 
@@ -4850,7 +4851,7 @@ class DataHandler
         // Try to fetch the site language from the pages' associated site
         $siteLanguage = $this->getSiteLanguageForPage((int)$pageId, (int)$language);
         if ($siteLanguage === null) {
-            $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Language ID "{languageId}" not found for page {pageId}', -1, ['languageId' => (int)$language, 'pageId' => (int)$pageId]);
+            $this->log($table, $uid, SystemLogDatabaseAction::LOCALIZE, null, SystemLogErrorClassification::USER_ERROR, 'Language ID "{languageId}" not found for page {pageId}', null, ['languageId' => (int)$language, 'pageId' => (int)$pageId]);
             return false;
         }
 
@@ -4863,7 +4864,7 @@ class DataHandler
                 $row[$translationOriginPointerFieldName]
             );
             if ((int)$localizationParentRecord[$languageFieldName] !== 0) {
-                $this->log($table, $localizationParentRecord['uid'], SystemLogDatabaseAction::LOCALIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Localization failed: Source record {table}:{originalRecordId} contained a reference to an original record that is not a default record (which is strange)', -1, ['table' => $table, 'originalRecordId' => $localizationParentRecord['uid']]);
+                $this->log($table, $localizationParentRecord['uid'], SystemLogDatabaseAction::LOCALIZE, null, SystemLogErrorClassification::USER_ERROR, 'Localization failed: Source record {table}:{originalRecordId} contained a reference to an original record that is not a default record (which is strange)', null, ['table' => $table, 'originalRecordId' => $localizationParentRecord['uid']]);
                 return false;
             }
         }
@@ -4871,7 +4872,7 @@ class DataHandler
         // Default language records must never have a localization parent as they are the origin of any translation.
         if ((int)$row[$translationOriginPointerFieldName] !== 0
             && (int)$row[$languageFieldName] === 0) {
-            $this->log($table, $row['uid'], SystemLogDatabaseAction::LOCALIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Localization failed: Source record {table}:{uid} contained a reference to an original default record but is a default record itself (which is strange)', -1, ['table' => $table, 'uid' => (int)$row['uid']]);
+            $this->log($table, $row['uid'], SystemLogDatabaseAction::LOCALIZE, null, SystemLogErrorClassification::USER_ERROR, 'Localization failed: Source record {table}:{uid} contained a reference to an original default record but is a default record itself (which is strange)', null, ['table' => $table, 'uid' => (int)$row['uid']]);
             return false;
         }
 
@@ -4882,10 +4883,10 @@ class DataHandler
                 $table,
                 $uid,
                 SystemLogDatabaseAction::LOCALIZE,
-                0,
+                null,
                 SystemLogErrorClassification::USER_ERROR,
                 'Localization failed: There already are localizations ({localizations}) for language {language} of the "{table}" record {uid}',
-                -1,
+                null,
                 [
                     'localizations' => implode(', ', array_column($recordLocalizations, 'uid')),
                     'language' => $language,
@@ -4913,10 +4914,11 @@ class DataHandler
         if ($languageCapability->hasTranslationSourceField()) {
             $overrideValues[$languageCapability->getTranslationSourceField()->getName()] = $uid;
         }
-        // Copy the type (if defined in both tables) from the original record so that translation has same type as original record
-        if ($schema->getSubSchemaDivisorField() !== null) {
-            // @todo: Possible bug here? type can be something like 'table:field', which is then null in $row, writing null to $overrideValues
-            $overrideValues[$schema->getSubSchemaDivisorField()->getName()] = $row[$schema->getSubSchemaDivisorField()->getName()] ?? null;
+        // Copy the value of the type from the original record so that translation has same type as original record
+        if ($schema->supportsSubSchema()) {
+            // @todo: We always copy the local field name, even on foreign table types, such as "uid_local:type"
+            $subSchemaDivisorFieldName = $schema->getSubSchemaTypeInformation()->getFieldName();
+            $overrideValues[$subSchemaDivisorFieldName] = $row[$subSchemaDivisorFieldName] ?? null;
         }
         // Set exclude Fields:
         foreach ($schema->getFields() as $field) {
@@ -4946,12 +4948,28 @@ class DataHandler
                     }
                 }
                 if (!empty($translateToMsg)) {
-                    $overrideValues[$field->getName()] = '[' . $translateToMsg . '] ' . $row[$field->getName()];
+                    $translateToMessage = '[' . $translateToMsg . '] ';
+                    $fieldContent = $row[$field->getName()];
+                    if ($field->isType(TableColumnType::TEXT) && str_starts_with($fieldContent, '<')) {
+                        // If the field is a text field, we need to prepend the translation message to the content
+                        // that means, it should be after the first opening HTML tag, if one exists.
+                        // @todo: Ideally we can use TcaSchema and Subschema in the future, to resolve this issue properly
+                        $overrideValues[$field->getName()] = preg_replace('/(<[^>]+>)/', '$1' . $translateToMessage, $fieldContent, 1);
+                    } else {
+                        $overrideValues[$field->getName()] = $translateToMessage . $fieldContent;
+                    }
                 } else {
                     $overrideValues[$field->getName()] = $row[$field->getName()];
                 }
             }
-            if (($field->getConfiguration()['MM'] ?? false) && !empty($field->getConfiguration()['MM_oppositeUsage'])) {
+            if (($field->getConfiguration()['MM'] ?? false)
+                // To determine the local side for fields with 'MM' config, we check if the field either
+                // has "MM_oppositeUsage" (foreign table names / field names) defined — e.g., sys_category with
+                // opposite usage to the table "pages" with the field "categories" — or if it does not have
+                // "MM_opposite_field" set. This field is set by the foreign side (e.g., an inline child)
+                // to allow editing the connection from both sides (bidirectional).
+                && (!empty($field->getConfiguration()['MM_oppositeUsage']) || !isset($field->getConfiguration()['MM_opposite_field']))
+            ) {
                 // We are localizing the 'local' side of an MM relation. (eg. localizing a category).
                 // In this case, MM relations connected to the default lang record should not be copied,
                 // so we set an override here to not trigger mm handling of 'items' field for this.
@@ -5021,7 +5039,8 @@ class DataHandler
     protected function inlineLocalizeSynchronize($table, $id, array $command): void
     {
         $schema = $this->tcaSchemaFactory->get($table);
-        $parentRecord = BackendUtility::getRecordWSOL($table, $id);
+        $parentRecord = BackendUtility::getRecord($table, $id);
+        BackendUtility::workspaceOL($table, $parentRecord, $this->BE_USER->workspace);
 
         /** @var LanguageAwareSchemaCapability $languageCapability */
         $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
@@ -5035,13 +5054,13 @@ class DataHandler
             $whereClause = BackendUtility::isTableWorkspaceEnabled($table) ? 'AND t3ver_oid=0' : '';
             $parentRecordLocalization = BackendUtility::getRecordLocalization($table, $id, $command['language'], $whereClause);
             if (empty($parentRecordLocalization)) {
-                $this->log($table, $id, SystemLogDatabaseAction::LOCALIZE, 0, SystemLogErrorClassification::MESSAGE, 'Localization for parent record {table}:{uid} cannot be fetched', -1, ['table' => $table, 'uid' => (int)$id], $this->eventPid($table, $id, $parentRecord['pid']));
+                $this->log($table, $id, SystemLogDatabaseAction::LOCALIZE, null, SystemLogErrorClassification::MESSAGE, 'Localization for parent record {table}:{uid} cannot be fetched', null, ['table' => $table, 'uid' => (int)$id], $table === 'pages' ? $id : $parentRecord['pid']);
                 return;
             }
             $parentRecord = $parentRecordLocalization[0];
             $id = $parentRecord['uid'];
             // Process overlay for current selected workspace
-            BackendUtility::workspaceOL($table, $parentRecord);
+            BackendUtility::workspaceOL($table, $parentRecord, $this->BE_USER->workspace);
         }
 
         $field = $command['field'] ?? '';
@@ -5070,7 +5089,8 @@ class DataHandler
             return;
         }
 
-        $transOrigRecord = BackendUtility::getRecordWSOL($table, $transOrigPointer);
+        $transOrigRecord = BackendUtility::getRecord($table, $transOrigPointer);
+        BackendUtility::workspaceOL($table, $transOrigRecord, $this->BE_USER->workspace);
 
         $removeArray = [];
         $mmTable = $relationFieldType === 'mm' && isset($config['MM']) && $config['MM'] ? $config['MM'] : '';
@@ -5088,7 +5108,8 @@ class DataHandler
         // Perform synchronization: Possibly removal of already localized records:
         if ($action === 'synchronize') {
             foreach ($dbAnalysisCurrent->itemArray as $index => $item) {
-                $childRecord = BackendUtility::getRecordWSOL($item['table'], $item['id']);
+                $childRecord = BackendUtility::getRecord($item['table'], $item['id']);
+                BackendUtility::workspaceOL($item['table'], $childRecord, $this->BE_USER->workspace);
                 if (isset($childRecord[$childTransOrigPointerField]) && $childRecord[$childTransOrigPointerField] > 0) {
                     $childTransOrigPointer = $childRecord[$childTransOrigPointerField];
                     // If synchronization is requested, child record was translated once, but original record does not exist anymore, remove it:
@@ -5133,6 +5154,7 @@ class DataHandler
         $this->registerDBList[$table][$id][$field] = $value;
         // Remove child records (if synchronization requested it):
         if (is_array($removeArray) && !empty($removeArray)) {
+            /** @var DataHandler $tce */
             $tce = GeneralUtility::makeInstance(self::class);
             $tce->enableLogging = $this->enableLogging;
             $tce->start([], $removeArray, $this->BE_USER, $this->referenceIndexUpdater);
@@ -5152,7 +5174,7 @@ class DataHandler
         }
         // Update field referencing to child records of localized parent record:
         if (!empty($updateFields)) {
-            $this->updateDB($table, $id, $updateFields);
+            $this->updateDB($table, $id, $updateFields, (int)$parentRecord['pid']);
         }
         if (isset($parentRecord['_ORIG_uid']) && (int)$parentRecord['_ORIG_uid'] !== (int)$id) {
             // If there is a ws overlay of the record, then the relation has been attached to *this*
@@ -5167,46 +5189,111 @@ class DataHandler
      */
     protected function isRecordLocalized(string $table, int $uid, int $language): bool
     {
-        $row = BackendUtility::getRecordWSOL($table, $uid);
+        $row = BackendUtility::getRecord($table, $uid);
+        BackendUtility::workspaceOL($table, $row, $this->BE_USER->workspace);
         $localizations = BackendUtility::getRecordLocalization($table, $uid, $language, 'pid=' . (int)$row['pid']);
         return !empty($localizations);
     }
 
-    /*********************************************
-     *
-     * Cmd: delete
-     *
-     ********************************************/
     /**
-     * Delete a single record
+     * Delete a single record.
      *
-     * @param string $table Table name
-     * @param int $id Record UID
      * @internal should only be used from within DataHandler
      */
-    public function deleteAction($table, $id): void
+    public function deleteAction(string $table, int|array $uidOrRow, bool $noRecordCheck = false, bool $forceHardDelete = false): void
     {
-        $recordToDelete = BackendUtility::getRecord($table, $id);
+        if (is_int($uidOrRow) && $uidOrRow <= 0) {
+            $this->log($table, $uidOrRow, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'Can not delete "{table}:{uid}": uid must be a positive int larger than zero', null, ['table' => $table, 'uid' => $uidOrRow], 0);
+            return;
+        }
+        if (!is_array($uidOrRow)) {
+            $recordToDelete = BackendUtility::getRecord($table, $uidOrRow, '*', '', false);
+            if ($recordToDelete === null) {
+                // No record no cry.
+                return;
+            }
+            $uid = $uidOrRow;
+        } else {
+            $recordToDelete = $uidOrRow;
+            $uid = (int)$recordToDelete['uid'];
+        }
+        unset($uidOrRow);
 
-        if (is_array($recordToDelete) && isset($recordToDelete['t3ver_wsid']) && (int)$recordToDelete['t3ver_wsid'] !== 0) {
-            // When dealing with a workspace record, use discard.
+        if ((int)($recordToDelete['t3ver_wsid'] ?? null) !== 0) {
+            // When uid to a workspace record is given, then discard always. This is coming from workspace BE
+            // module "waste bin" icon, which sends the workspace uid of the record with the intention to
+            // discard the overlay.
+            // @todo: It might be better to have an own cmdmap action for 'discard' directly to avoid
+            //        live / workspace uid confusion with 'delete' and this dispatching.
             $this->discard($table, null, $recordToDelete);
             return;
         }
 
-        // Record asked to be deleted was found:
-        if (is_array($recordToDelete)) {
-            $recordWasDeleted = false;
-            foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['processCmdmapClass'] ?? [] as $className) {
-                $hookObj = GeneralUtility::makeInstance($className);
-                if (method_exists($hookObj, 'processCmdmap_deleteAction')) {
-                    /** @var bool $recordWasDeleted */
-                    $hookObj->processCmdmap_deleteAction($table, $id, $recordToDelete, $recordWasDeleted, $this);
-                }
+        $recordWasDeleted = false;
+        foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['processCmdmapClass'] ?? [] as $className) {
+            $hookObj = GeneralUtility::makeInstance($className);
+            if (method_exists($hookObj, 'processCmdmap_deleteAction')) {
+                $hookObj->processCmdmap_deleteAction($table, $uid, $recordToDelete, $recordWasDeleted, $this);
+                /** @var bool $recordWasDeleted */
             }
-            // Delete the record if a hook hasn't deleted it yet
-            if (!$recordWasDeleted) {
-                $this->deleteEl($table, $id);
+        }
+        if ($recordWasDeleted) {
+            return;
+        }
+
+        $beUserCurrentWorkspace = $this->BE_USER->workspace;
+        if ($workspaceRecordOverlay = BackendUtility::getWorkspaceVersionOfRecord($beUserCurrentWorkspace, $table, $uid)) {
+            $workspaceRecordOverlayVersionState = VersionState::tryFrom($workspaceRecordOverlay['t3ver_state']);
+            if ($workspaceRecordOverlayVersionState === VersionState::DEFAULT_STATE) {
+                if (!$noRecordCheck && !$this->BE_USER->recordEditAccessInternals($table, $workspaceRecordOverlay)) {
+                    $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record "{table:uid}" without delete-permissions', null, ['table' => $table, 'uid' => $workspaceRecordOverlay['uid']]);
+                    return;
+                }
+                // If incoming uid references a live record (t3ver_wsid=0), and user is in workspace, and there is a "workspace modified"
+                // version of the record, then we'll turn the workspace record into a delete overlay if it isn't one already.
+                $this->connectionPool->getConnectionForTable($table)->update(
+                    $table,
+                    ['t3ver_state' => VersionState::DELETE_PLACEHOLDER->value],
+                    ['uid' => (int)$workspaceRecordOverlay['uid']],
+                    [Connection::PARAM_INT]
+                );
+                $this->updateRefIndex($table, (int)$workspaceRecordOverlay['uid']);
+                // @todo: Optimize to hand over record and skip early for sys_language_uid !== 0 ??
+                $this->deleteL10nOverlayRecords($table, $uid);
+            } else {
+                // * Discard "delete" placeholder, kinda obvious.
+                // * Discard "new" placeholder, which is a DB inconsistency at this point since "existing live" record
+                //   plus "new" workspace placeholder shouldn't happen.
+                // * Discard "move" placeholder: When using "waste bin" in page module of a moved record, the move operation
+                //   (and potentially additionally changed) record is discarded. The live version "re-appers" at the
+                //   old position.
+                $this->discard($table, null, $workspaceRecordOverlay);
+            }
+            return;
+        }
+        if ($beUserCurrentWorkspace === 0) {
+            $this->deleteEl($table, $recordToDelete, $noRecordCheck, $forceHardDelete);
+            return;
+        }
+        if (!BackendUtility::isTableWorkspaceEnabled($table)) {
+            if (!$noRecordCheck && !$this->BE_USER->workspaceAllowsLiveEditingInTable($table)) {
+                $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record "{table}:{uid}" from not workspace aware table without live editing permissions', null, ['table' => $table, 'uid' => $uid]);
+                return;
+            }
+            $this->deleteEl($table, $recordToDelete, $noRecordCheck, $forceHardDelete);
+            return;
+        }
+        // Create delete placeholder records in workspace
+        // @todo: Stop using versionizeRecord(), check permissions directly instead and use a lower level method.
+        $copyMappingArray = $this->copyMappingArray;
+        $this->versionizeRecord($table, $uid, 'DELETED!', true);
+        // Determine newly created versions to delete localization overlays:
+        // Remove placeholders are copied and modified, thus they appear in the copyMappingArray
+        $versionedElements = ArrayUtility::arrayDiffKeyRecursive($this->copyMappingArray, $copyMappingArray);
+        foreach ($versionedElements as $versionedTableName => $versionedOriginalIds) {
+            // Delete localization overlays
+            foreach ($versionedOriginalIds as $versionedOriginalId => $_) {
+                $this->deleteL10nOverlayRecords($versionedTableName, (int)$versionedOriginalId);
             }
         }
     }
@@ -5214,21 +5301,57 @@ class DataHandler
     /**
      * Delete element from any table
      *
-     * @param string $table Table name
-     * @param int $uid Record UID
-     * @param bool $noRecordCheck Flag: If $noRecordCheck is set, then the function does not check permission to delete record
-     * @param bool $forceHardDelete If TRUE, the "deleted" flag is ignored if applicable for record and the record is deleted COMPLETELY!
-     * @param bool $deleteRecordsOnPage If false and if deleting pages, records on the page will not be deleted (edge case while swapping workspaces)
-     * @internal should only be used from within DataHandler
+     * @param bool $noRecordCheck If true, records are not checked for permissions
+     * @param bool $forceHardDelete If true, the "deleted" flag is ignored if applicable for record and the record is deleted COMPLETELY!
      */
-    public function deleteEl(string $table, int $uid, bool $noRecordCheck = false, bool $forceHardDelete = false, bool $deleteRecordsOnPage = true): void
+    public function deleteEl(string $table, int|array $uidOrRow, bool $noRecordCheck = false, bool $forceHardDelete = false): void
     {
+        if (is_int($uidOrRow) && $uidOrRow <= 0) {
+            $this->log($table, $uidOrRow, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'Can not delete "{table}:{uid}": uid must be a positive int larger than zero', null, ['table' => $table, 'uid' => $uidOrRow], 0);
+            return;
+        }
+        if (!is_array($uidOrRow)) {
+            $recordToDelete = BackendUtility::getRecord($table, $uidOrRow, '*', '', false);
+            if ($recordToDelete === null) {
+                // No record no cry.
+                return;
+            }
+        } else {
+            $recordToDelete = $uidOrRow;
+        }
+        unset($uidOrRow);
+
+        $uid = (int)$recordToDelete['uid'];
         if ($table === 'pages') {
-            $this->deletePages($uid, $noRecordCheck, $forceHardDelete, $deleteRecordsOnPage);
+            $languageCapability = $this->tcaSchemaFactory->get('pages')->getCapability(TcaSchemaCapability::Language);
+            $localizationParentFieldName = $languageCapability->getTranslationOriginPointerField()->getName();
+            $localizationParent = (int)($recordToDelete[$localizationParentFieldName] ?? 0);
+            $subPages = [];
+            if ($localizationParent === 0) {
+                // When deleting a default language page, subpages have to be deleted as well.
+                $subPages = $this->getSubPagesOfPage($uid, !$forceHardDelete);
+            }
+            $defaultLanguagePageRecord = $recordToDelete;
+            if ($localizationParent !== 0) {
+                $defaultLanguagePageRecord = BackendUtility::getRecord('pages', $localizationParent, '*', '', false);
+                if ($defaultLanguagePageRecord === null) {
+                    $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'Can not delete localized "pages:{uid}", default language page record "pages:{localizationParent}" not found', null, ['uid' => $uid, 'localizationParent' => $localizationParent], 0);
+                    return;
+                }
+            }
+            if (!$noRecordCheck && is_string($pagesDeletePermissionError = $this->canDeletePage($recordToDelete, $defaultLanguagePageRecord, $subPages))) {
+                $this->log('pages', $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::SYSTEM_ERROR, $pagesDeletePermissionError);
+                return;
+            }
+            foreach ($subPages as $subPage) {
+                // Delete subpages. $subPages is a list of default language pages.
+                $this->deleteSpecificPage($subPage, $forceHardDelete);
+            }
+            $this->deleteSpecificPage($recordToDelete, $forceHardDelete);
         } else {
             $this->discardLocalizedWorkspaceVersionsOfRecord($table, $uid);
             $this->discardWorkspaceVersionsOfRecord($table, $uid);
-            $this->deleteRecord($table, $uid, $noRecordCheck, $forceHardDelete);
+            $this->deleteRecord($table, $recordToDelete, $noRecordCheck, $forceHardDelete);
         }
     }
 
@@ -5241,17 +5364,17 @@ class DataHandler
     protected function discardLocalizedWorkspaceVersionsOfRecord(string $table, int $uid): void
     {
         $schema = $this->tcaSchemaFactory->get($table);
-        if (!$schema->isLanguageAware()
-            || !$schema->isWorkspaceAware()
-            || !$this->BE_USER->recordEditAccessInternals($table, $uid)
-        ) {
+        if (!$schema->isLanguageAware() || !$schema->isWorkspaceAware()) {
+            return;
+        }
+        $liveRecord = BackendUtility::getRecord($table, $uid);
+        if ($liveRecord === null || !$this->BE_USER->recordEditAccessInternals($table, $liveRecord)) {
             return;
         }
         /** @var LanguageAwareSchemaCapability $languageCapability */
         $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
         $languageField = $languageCapability->getLanguageField()->getName();
         $localizationParentFieldName = $languageCapability->getTranslationOriginPointerField()->getName();
-        $liveRecord = BackendUtility::getRecord($table, $uid);
         if ((int)($liveRecord[$languageField] ?? 0) !== 0 || (int)($liveRecord['t3ver_wsid'] ?? 0) !== 0) {
             // Don't do anything if we're not deleting a live record in default language
             return;
@@ -5287,9 +5410,8 @@ class DataHandler
      *
      * @param string $table Table name
      * @param int $uid Record UID
-     * @internal should only be used from within DataHandler
      */
-    protected function discardWorkspaceVersionsOfRecord($table, $uid): void
+    protected function discardWorkspaceVersionsOfRecord(string $table, int $uid): void
     {
         $versions = BackendUtility::selectVersionsOfRecord($table, $uid, '*', null);
         if ($versions === null) {
@@ -5319,69 +5441,73 @@ class DataHandler
      * If both $noRecordCheck and $forceHardDelete are set it could even delete a "deleted"-flagged record!
      *
      * @param string $table Table name
-     * @param int $uid Record UID
+     * @param int|array $uidOrRow record uid or full record row
      * @param bool $noRecordCheck Flag: If $noRecordCheck is set, then the function does not check permission to delete record
      * @param bool $forceHardDelete If TRUE, the "deleted" flag is ignored if applicable for record and the record is deleted COMPLETELY!
      * @internal should only be used from within DataHandler
      */
-    public function deleteRecord(string $table, int $uid, bool $noRecordCheck = false, bool $forceHardDelete = false): void
+    public function deleteRecord(string $table, int|array $uidOrRow, bool $noRecordCheck = false, bool $forceHardDelete = false): void
     {
-        $currentUserWorkspace = $this->BE_USER->workspace;
-        if (!$this->tcaSchemaFactory->has($table) || !$uid) {
-            $this->log($table, $uid, SystemLogDatabaseAction::DELETE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record without delete-permissions [{reason}]', -1, ['reason' => $this->BE_USER->errorMsg]);
+        if (is_int($uidOrRow) && $uidOrRow <= 0) {
+            $this->log($table, $uidOrRow, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'Can not delete "{table}:{uid}": uid must be a positive int larger than zero', null, ['table' => $table, 'uid' => $uidOrRow], 0);
             return;
         }
-        // Skip processing already deleted records
-        if (!$forceHardDelete && $this->hasDeletedRecord($table, $uid)) {
-            return;
-        }
-
-        $schema = $this->tcaSchemaFactory->get($table);
-
-        // Checking if there is anything else disallowing deleting the record by checking if editing is allowed
-        $fullLanguageAccessCheck = true;
-        if ($table === 'pages') {
-            // If this is a page translation, the full language access check should not be done
-            $defaultLanguagePageId = $this->getDefaultLanguagePageId($uid);
-            if ($defaultLanguagePageId !== $uid) {
-                $fullLanguageAccessCheck = false;
+        if (!is_array($uidOrRow)) {
+            $recordToDelete = BackendUtility::getRecord($table, $uidOrRow, '*', '', false);
+            if ($recordToDelete === null) {
+                // No record no cry.
+                return;
             }
+            $uid = $uidOrRow;
+        } else {
+            $recordToDelete = $uidOrRow;
+            $uid = (int)$recordToDelete['uid'];
         }
-        $hasEditAccess = $this->BE_USER->recordEditAccessInternals($table, $uid, false, $forceHardDelete, $fullLanguageAccessCheck);
-        if (!$hasEditAccess) {
-            $this->log($table, $uid, SystemLogDatabaseAction::DELETE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record without delete-permissions');
+        unset($uidOrRow);
+
+        $currentUserWorkspace = $this->BE_USER->workspace;
+        $uid = (int)$recordToDelete['uid'];
+
+        if (!$this->tcaSchemaFactory->has($table) || $uid <= 0) {
+            $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record without delete-permissions [{reason}]', null, ['reason' => $this->BE_USER->errorMsg]);
             return;
         }
-        if ($table === 'pages') {
-            $perms = Permission::PAGE_DELETE;
-        } elseif ($table === 'sys_file_reference' && array_key_exists('pages', $this->datamap)) {
+        $schema = $this->tcaSchemaFactory->get($table);
+        if (!$this->BE_USER->recordEditAccessInternals($table, $recordToDelete, false, null, true)) {
+            $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record without delete-permissions');
+            return;
+        }
+        if ($table === 'sys_file_reference' && array_key_exists('pages', $this->datamap)) {
             // @todo: find a more generic way to handle content relations of a page (without needing content editing access to that page)
             $perms = Permission::PAGE_EDIT;
         } else {
             $perms = Permission::CONTENT_EDIT;
         }
-        if (!$noRecordCheck && !$this->doesRecordExist($table, $uid, $perms)) {
+
+        $recordWorkspaceId = (int)($recordToDelete['t3ver_wsid'] ?? 0);
+        if ($recordWorkspaceId > 0) {
+            // @todo: Verify this can not happen anymore and this case is dispatched to discard() more early.
             return;
         }
-
-        $recordToDelete = [];
-        $recordWorkspaceId = 0;
-        if ($schema->isWorkspaceAware()) {
-            $recordToDelete = BackendUtility::getRecord($table, $uid);
-            $recordWorkspaceId = (int)($recordToDelete['t3ver_wsid'] ?? 0);
+        if (!$noRecordCheck) {
+            $pageRecord = [];
+            if ((int)$recordToDelete['pid'] > 0) {
+                $pageRecord = BackendUtility::getRecord('pages', $recordToDelete['pid'], '*', '', false);
+                if (!is_array($pageRecord)) {
+                    $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record "{table}:{uid}" which is not assigned to a valid page', null, ['table' => $table, 'uid' => $uid]);
+                    return;
+                }
+            }
+            if (!$this->hasPagePermission($perms, $pageRecord)) {
+                $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record "{table}:{uid}" without permission', null, ['table' => $table, 'uid' => $uid]);
+                return;
+            }
         }
 
         // Clear cache before deleting the record, else the correct page cannot be identified by clear_cache
         [$parentUid] = BackendUtility::getTSCpid($table, $uid, '');
         $this->registerRecordIdForPageCacheClearing($table, $uid, $parentUid);
-        $databaseErrorMessage = '';
-        if ($recordWorkspaceId > 0) {
-            // If this is a workspace record, use discard
-            $this->BE_USER->workspace = $recordWorkspaceId;
-            $this->discard($table, null, $recordToDelete);
-            // Switch user back to original workspace
-            $this->BE_USER->workspace = $currentUserWorkspace;
-        } elseif ($schema->hasCapability(TcaSchemaCapability::SoftDelete) && !$forceHardDelete) {
+        if ($schema->hasCapability(TcaSchemaCapability::SoftDelete) && !$forceHardDelete) {
             $updateFields = [
                 $schema->getCapability(TcaSchemaCapability::SoftDelete)->getFieldName() => 1,
             ];
@@ -5389,52 +5515,23 @@ class DataHandler
                 $updateFields[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
             }
             // before deleting this record, check for child records or references
-            $this->deleteRecord_procFields($table, $uid);
-            try {
-                // Delete all l10n records as well
-                $this->deletedRecords[$table][] = $uid;
-                $this->deleteL10nOverlayRecords($table, $uid);
-                $this->connectionPool->getConnectionForTable($table)
-                    ->update($table, $updateFields, ['uid' => $uid]);
-            } catch (DBALException $e) {
-                $databaseErrorMessage = $e->getPrevious()->getMessage();
-            }
+            $this->deleteRecord_procFields($table, $recordToDelete);
+            // Delete all l10n records as well
+            $this->deleteL10nOverlayRecords($table, $uid);
+            $this->connectionPool->getConnectionForTable($table)->update($table, $updateFields, ['uid' => $uid]);
+            $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::MESSAGE, 'Record {table}:{uid} was deleted from pages:{pid}', null, ['table' => $table, 'uid' =>  $uid, 'pid' => (int)($recordToDelete['pid'] ?? 0)], (int)($recordToDelete['pid'] ?? 0));
         } else {
-            // Delete the hard way...:
-            try {
-                $this->hardDeleteSingleRecord($table, $uid);
-                $this->deletedRecords[$table][] = $uid;
-                $this->deleteL10nOverlayRecords($table, $uid);
-            } catch (DBALException $e) {
-                $databaseErrorMessage = $e->getPrevious()->getMessage();
-            }
-        }
-        if ($this->enableLogging) {
-            $state = SystemLogDatabaseAction::DELETE;
-            if ($databaseErrorMessage === '') {
-                if ($forceHardDelete) {
-                    $message = 'Record "{title}" ({table}:{uid}) was deleted unrecoverable from page "{pageTitle}" ({pid})';
-                } else {
-                    $message = 'Record "{title}" ({table}:{uid}) was deleted from page "{pageTitle}" ({pid})';
-                }
-                $propArr = $this->getRecordProperties($table, $uid);
-                $pagePropArr = $this->getRecordProperties('pages', $propArr['pid']);
-
-                $this->log($table, $uid, $state, 0, SystemLogErrorClassification::MESSAGE, $message, 0, [
-                    'title' => $propArr['header'],
-                    'table' => $table,
-                    'uid' =>  $uid,
-                    'pageTitle' => $pagePropArr['header'],
-                    'pid' => $propArr['pid'],
-                ], $propArr['event_pid']);
-            } else {
-                $this->log($table, $uid, $state, 0, SystemLogErrorClassification::SYSTEM_ERROR, $databaseErrorMessage);
-            }
+            // Delete child records. If the parent table is NOT soft-delete aware, it will get
+            // hard deleted. Attached children have to be hard-deleted aware as well, they'd be
+            // "orphaned" otherwise. We thus $forceHardDelete=true to deleteRecord_procFields().
+            $this->deleteRecord_procFields($table, $recordToDelete, true);
+            $this->hardDeleteSingleRecord($table, $uid);
+            $this->deleteL10nOverlayRecords($table, $uid);
+            $this->log($table, $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::MESSAGE, 'Record {table}:{uid} was deleted unrecoverable from pages:{pid}', null, ['table' => $table, 'uid' =>  $uid, 'pid' => (int)($recordToDelete['pid'] ?? 0)], (int)($recordToDelete['pid'] ?? 0));
         }
 
         // Add history entry
         $this->getRecordHistoryStore()->deleteRecord($table, $uid, $this->correlationId);
-
         // Update reference index with table/uid on left side (recuid)
         $this->updateRefIndex($table, $uid);
         // Update reference index with table/uid on right side (ref_uid). Important if children of a relation are deleted.
@@ -5442,68 +5539,24 @@ class DataHandler
     }
 
     /**
-     * Used to delete page because it will check for branch below pages and disallowed tables on the page as well.
-     *
-     * @param int $uid Page id
-     * @param bool $force If TRUE, pages are not checked for permission.
-     * @param bool $forceHardDelete If TRUE, the "deleted" flag is ignored if applicable for record and the record is deleted COMPLETELY!
-     * @param bool $deleteRecordsOnPage If false, records on the page will not be deleted (edge case while swapping workspaces)
-     * @internal should only be used from within DataHandler
-     */
-    public function deletePages(int $uid, bool $force = false, bool $forceHardDelete = false, bool $deleteRecordsOnPage = true): void
-    {
-        if ($uid === 0) {
-            $this->log('pages', $uid, SystemLogDatabaseAction::DELETE, 0, SystemLogErrorClassification::SYSTEM_ERROR, 'Deleting all pages starting from the root-page is disabled', -1, [], 0);
-            return;
-        }
-        // Getting list of pages to delete:
-        if ($force) {
-            // Returns the branch WITHOUT permission checks, so it cannot return null
-            $res = $this->doesBranchExist($uid, Permission::NOTHING);
-            if (is_array($res)) {
-                $res[] = $uid;
-            }
-        } else {
-            $res = $this->canDeletePage($uid);
-        }
-        // Perform deletion if no error occurred
-        if (is_array($res)) {
-            foreach ($res as $deleteId) {
-                $this->deleteSpecificPage($deleteId, $forceHardDelete, $deleteRecordsOnPage);
-            }
-        } else {
-            $this->log(
-                'pages',
-                $uid,
-                SystemLogDatabaseAction::DELETE,
-                0,
-                SystemLogErrorClassification::SYSTEM_ERROR,
-                $res,
-            );
-        }
-    }
-
-    /**
      * Delete a page (or set deleted field to 1) and all records on it.
      *
-     * @param int $uid Page id
      * @param bool $forceHardDelete If TRUE, the "deleted" flag is ignored if applicable for record and the record is deleted COMPLETELY!
-     * @param bool $deleteRecordsOnPage If false, records on the page will not be deleted (edge case while swapping workspaces)
-     * @internal
-     * @see deletePages()
      */
-    protected function deleteSpecificPage(int $uid, bool $forceHardDelete, bool $deleteRecordsOnPage): void
+    protected function deleteSpecificPage(array $recordToDelete, bool $forceHardDelete): void
     {
-        if (!$uid) {
-            // Early void return on invalid uid
-            return;
-        }
+        $pagesSchema = $this->tcaSchemaFactory->get('pages');
+        $languageCapability = $pagesSchema->getCapability(TcaSchemaCapability::Language);
+
+        $currentUserWorkspace = $this->BE_USER->workspace;
+        $uid = (int)$recordToDelete['uid'];
 
         // Delete either a default language page or a translated page
-        $pageIdInDefaultLanguage = $this->getDefaultLanguagePageId($uid);
+        $pageIdInDefaultLanguage = $uid;
         $isPageTranslation = false;
+        $localizationParent = (int)($recordToDelete[$languageCapability->getTranslationOriginPointerField()->getName()] ?? 0);
         $pageLanguageId = 0;
-        if ($pageIdInDefaultLanguage !== $uid) {
+        if ($localizationParent > 0) {
             // For translated pages, translated records in other tables (eg. tt_content) for the
             // to-delete translated page have their pid field set to the uid of the default language record,
             // NOT the uid of the translated page record.
@@ -5511,20 +5564,51 @@ class DataHandler
             // should be deleted. The code checks if the to-delete page is a translated page and
             // adapts the query for other tables to use the uid of the default language page as pid together
             // with the language id of the translated page.
+            // If a default language page is deleted, the access checks below behave subtly different.
+            $pageIdInDefaultLanguage = $localizationParent;
             $isPageTranslation = true;
-            $pageLanguageId = $this->pageInfo($uid, $this->tcaSchemaFactory->get('pages')->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName());
+            $pagesLanguageFieldName = $languageCapability->getLanguageField()->getName();
+            $pageLanguageId = $recordToDelete[$pagesLanguageFieldName] ?? 0;
+        }
+        $otherLocalizationExists = false;
+        if ($isPageTranslation && $forceHardDelete) {
+            // Restriction when hard deleting localized pages: Usually, localized records are hard deleted as well
+            // when hard deleting a localized page (via recycler). However, when a soft-deleted localized page is
+            // hard-deleted while another NOT soft-deleted localization of the page exists in the same
+            // sys_language_uid (created after the other translation has been soft-deleted), then records do not
+            // "know" if they belong to the soft-deleted, or the active localized page. In this case, we only
+            // hard delete the soft-deleted page, but no records, to keep existing records that belong to the
+            // active localization.
+            $queryBuilder = $this->connectionPool->getQueryBuilderForTable('pages');
+            $queryBuilder->getRestrictions()->removeAll();
+            $queryBuilder->getRestrictions()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+            $otherLocalizationExists = (bool)$queryBuilder->count('uid')->from('pages')
+                ->where(
+                    $queryBuilder->expr()->eq(
+                        $languageCapability->getTranslationOriginPointerField()->getName(),
+                        $queryBuilder->createNamedParameter($pageIdInDefaultLanguage, Connection::PARAM_INT)
+                    ),
+                    $queryBuilder->expr()->eq(
+                        $languageCapability->getLanguageField()->getName(),
+                        $queryBuilder->createNamedParameter($pageLanguageId, Connection::PARAM_INT)
+                    )
+                )
+                ->executeQuery()
+                ->fetchOne();
         }
 
-        if ($deleteRecordsOnPage) {
-            foreach ($this->tcaSchemaFactory->all() as $schema) {
-                $table = $schema->getName();
-                if ($table === 'pages' || ($isPageTranslation && !$schema->isLanguageAware())) {
+        if (!$otherLocalizationExists) {
+            foreach ($this->tcaSchemaFactory->all() as $subSchema) {
+                $table = $subSchema->getName();
+                if ($table === 'pages' || ($isPageTranslation && !$subSchema->isLanguageAware())) {
                     // Skip pages table. And skip table if not translatable, but a translated page is deleted
                     continue;
                 }
-
                 $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-                $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
+                $queryBuilder->getRestrictions()->removeAll();
+                if (!$forceHardDelete) {
+                    $queryBuilder->getRestrictions()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+                }
                 $queryBuilder
                     ->select('uid')
                     ->from($table)
@@ -5533,7 +5617,6 @@ class DataHandler
                     // leading to hard to debug issues. This is especially relevant for the
                     // discardWorkspaceVersionsOfRecord() call below.
                     ->addOrderBy('uid');
-
                 if ($isPageTranslation) {
                     // Only delete records in the specified language
                     $queryBuilder->where(
@@ -5542,7 +5625,7 @@ class DataHandler
                             $queryBuilder->createNamedParameter($pageIdInDefaultLanguage, Connection::PARAM_INT)
                         ),
                         $queryBuilder->expr()->eq(
-                            $schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName(),
+                            $subSchema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName(),
                             $queryBuilder->createNamedParameter($pageLanguageId, Connection::PARAM_INT)
                         )
                     );
@@ -5555,9 +5638,7 @@ class DataHandler
                         )
                     );
                 }
-
-                $currentUserWorkspace = $this->BE_USER->workspace;
-                if ($currentUserWorkspace !== 0 && $schema->isWorkspaceAware()) {
+                if ($currentUserWorkspace !== 0 && $subSchema->isWorkspaceAware()) {
                     // If we are in a workspace, make sure only records of this workspace are deleted.
                     $queryBuilder->andWhere(
                         $queryBuilder->expr()->eq(
@@ -5566,151 +5647,226 @@ class DataHandler
                         )
                     );
                 }
-
                 $statement = $queryBuilder->executeQuery();
-
                 while ($row = $statement->fetchAssociative()) {
                     // Delete any further workspace overlays of the record in question, then delete the record.
-                    $this->discardWorkspaceVersionsOfRecord($table, $row['uid']);
-                    $this->deleteRecord($table, (int)$row['uid'], true, $forceHardDelete);
+                    $this->discardWorkspaceVersionsOfRecord($table, (int)$row['uid']);
+                    $this->deleteRecord($table, $row, true, $forceHardDelete);
                 }
             }
         }
 
         // Delete any further workspace overlays of the record in question, then delete the record.
         $this->discardWorkspaceVersionsOfRecord('pages', $uid);
-        $this->deleteRecord('pages', $uid, true, $forceHardDelete);
+
+        if (!$this->BE_USER->recordEditAccessInternals('pages', $recordToDelete, false, null, !$isPageTranslation)) {
+            $this->log('pages', $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to delete record "pages:{uid}" without delete-permissions', null, ['uid' => $uid]);
+            return;
+        }
+
+        $recordWorkspaceId = (int)($recordToDelete['t3ver_wsid'] ?? 0);
+
+        // Clear cache before deleting the record, else the correct page cannot be identified by clear_cache
+        [$parentUid] = BackendUtility::getTSCpid('pages', $uid, '');
+        $this->registerRecordIdForPageCacheClearing('pages', $uid, $parentUid);
+        if ($recordWorkspaceId > 0) {
+            // @todo: This should be relocated elsewhere, dispatching to discard() here should happen at a different position:
+            //        This is called by "delete page" code, especially canDeletePage() and doesBranchExist() which fetch *all*
+            //        sub page uid's including their workspace overlays. It would be better if the "delete sub pages" code would
+            //        not fetch overlays, but if "delete single live page" code would take care of discarding overlays directly.
+            // If this is a workspace record, use discard
+            $this->BE_USER->workspace = $recordWorkspaceId;
+            $this->discard('pages', null, $recordToDelete);
+            // Switch user back to original workspace
+            $this->BE_USER->workspace = $currentUserWorkspace;
+        } elseif ($pagesSchema->hasCapability(TcaSchemaCapability::SoftDelete) && !$forceHardDelete) {
+            $updateFields = [
+                $pagesSchema->getCapability(TcaSchemaCapability::SoftDelete)->getFieldName() => 1,
+            ];
+            if ($pagesSchema->hasCapability(TcaSchemaCapability::UpdatedAt)) {
+                $updateFields[$pagesSchema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
+            }
+            // before deleting this record, check for child records or references
+            $this->deleteRecord_procFields('pages', $recordToDelete);
+            // Delete all l10n records as well
+            $this->deleteL10nOverlayRecords('pages', $uid);
+            $this->connectionPool->getConnectionForTable('pages')->update('pages', $updateFields, ['uid' => $uid]);
+            $this->log('pages', $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::MESSAGE, 'Record pages:{uid} was deleted', null, ['uid' =>  $uid], (int)($recordToDelete['pid'] ?? 0));
+        } else {
+            // Delete the hard way...:
+            $this->deleteL10nOverlayRecords('pages', $uid, $forceHardDelete);
+            $this->hardDeleteSingleRecord('pages', $uid);
+            $this->log('pages', $uid, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::MESSAGE, 'Record pages:{uid} was deleted unrecoverable', null, ['uid' =>  $uid], (int)($recordToDelete['pid'] ?? 0));
+        }
+
+        // Add history entry
+        $this->getRecordHistoryStore()->deleteRecord('pages', $uid, $this->correlationId);
+        // Update reference index with table/uid on left side (recuid)
+        $this->updateRefIndex('pages', $uid);
+        // Update reference index with table/uid on right side (ref_uid). Important if children of a relation are deleted.
+        $this->referenceIndexUpdater->registerUpdateForReferencesToItem('pages', $uid, $currentUserWorkspace);
     }
 
     /**
-     * Used to evaluate if a page can be deleted
+     * Evaluate if a page can be deleted. Checks access to page and sub pages, and access to records on them.
      *
-     * @param int $uid Page id
-     * @return int[]|string If array: List of page uids to traverse and delete (means OK), if string: error message.
-     * @internal should only be used from within DataHandler
+     * @param array $pageRecord The page record to delete
+     * @param array $defaultLanguagePageRecord The default language page record if $pageRecord is a localization. Identical to
+     *                                       $pageRecord if $pageRecord *is* a default language record
+     * @param array $subPages List of subpages. Only set if a default language page record should be deleted.
      */
-    public function canDeletePage($uid)
+    protected function canDeletePage(array $pageRecord, array $defaultLanguagePageRecord, array $subPages): ?string
     {
-        $uid = (int)$uid;
-        $isTranslatedPage = null;
-
-        // If we may at all delete this page
-        // If this is a page translation, do the check against the perms_* of the default page
-        // Because it is currently only deleting the translation
-        $defaultLanguagePageId = $this->getDefaultLanguagePageId($uid);
-        if ($defaultLanguagePageId !== $uid) {
-            if ($this->doesRecordExist('pages', (int)$defaultLanguagePageId, Permission::PAGE_DELETE)) {
-                $isTranslatedPage = true;
-            } else {
-                return 'Attempt to delete page without permissions';
-            }
-        } elseif (!$this->doesRecordExist('pages', $uid, Permission::PAGE_DELETE)) {
+        $languageCapability = $this->tcaSchemaFactory->get('pages')->getCapability(TcaSchemaCapability::Language);
+        $localizationParentFieldName = $languageCapability->getTranslationOriginPointerField()->getName();
+        $localizationParent = (int)($pageRecord[$localizationParentFieldName] ?? 0);
+        $pageRecordToCheck = $pageRecord;
+        if ($localizationParent > 0) {
+            $pageRecordToCheck = $defaultLanguagePageRecord;
+        }
+        if (!$this->hasPagePermission(Permission::PAGE_DELETE, $pageRecordToCheck)) {
             return 'Attempt to delete page without permissions';
         }
-
-        $pagesInBranch = $this->doesBranchExist($uid, Permission::PAGE_DELETE);
-        if ($pagesInBranch === null) {
-            return 'Attempt to delete pages in branch without permissions';
+        if (!$this->BE_USER->recordEditAccessInternals('pages', $pageRecord, false, null, $localizationParent === $pageRecord['uid'])) {
+            return 'Attempt to delete page which has prohibited localizations';
         }
-
-        $pagesInBranch[] = $uid;
-
-        if ($disallowedTables = $this->checkForRecordsFromDisallowedTables($pagesInBranch)) {
-            return 'Attempt to delete records from disallowed tables (' . implode(', ', $disallowedTables) . ')';
-        }
-
-        foreach ($pagesInBranch as $pageInBranch) {
-            if (!$this->BE_USER->recordEditAccessInternals('pages', $pageInBranch, false, false, !$isTranslatedPage)) {
+        foreach ($subPages as $subPage) {
+            if (!$this->admin && !$this->BE_USER->doesUserHaveAccess($subPage, Permission::PAGE_DELETE)) {
+                return 'Attempt to delete pages in branch without permissions';
+            }
+            if (!$this->BE_USER->recordEditAccessInternals('pages', $subPage, false, null, true)) {
                 return 'Attempt to delete page which has prohibited localizations';
             }
         }
-        return $pagesInBranch;
-    }
-
-    /**
-     * Returns TRUE if record CANNOT be deleted, otherwise FALSE. Used to check before the versioning API allows a record to be marked for deletion.
-     *
-     * @param string $table Record Table
-     * @param int $id Record UID
-     * @return string Returns a string IF there is an error (error string explaining). FALSE means record can be deleted
-     * @internal should only be used from within DataHandler
-     */
-    public function cannotDeleteRecord($table, $id)
-    {
-        if ($table === 'pages') {
-            $res = $this->canDeletePage($id);
-            return is_array($res) ? false : $res;
+        if (!$this->admin) {
+            // Check if there are records from tables on the pages to be deleted which the current user is not allowed to touch.
+            foreach ($this->tcaSchemaFactory->all() as $schema) {
+                // @todo: Shouldn't we skip 'pages' here?
+                $table = $schema->getName();
+                $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
+                $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+                $count = $queryBuilder->count('uid')
+                    ->from($table)
+                    ->where(
+                        $queryBuilder->expr()->in(
+                            'pid',
+                            $queryBuilder->createNamedParameter(array_merge([$pageRecord['uid']], array_column($subPages, 'uid')), Connection::PARAM_INT_ARRAY)
+                        )
+                    )
+                    ->executeQuery()
+                    ->fetchOne();
+                if ($count && ($schema->hasCapability(TcaSchemaCapability::AccessReadOnly) || !$this->checkModifyAccessList($table))) {
+                    return 'Attempt to delete records from disallowed table "' . $table . '"';
+                }
+            }
         }
-        if ($table === 'sys_file_reference' && array_key_exists('pages', $this->datamap)) {
-            // @todo: find a more generic way to handle content relations of a page (without needing content editing access to that page)
-            $perms = Permission::PAGE_EDIT;
-        } else {
-            $perms = Permission::CONTENT_EDIT;
-        }
-        return $this->doesRecordExist($table, $id, $perms) ? false : 'No permission to delete record';
+        return null;
     }
 
     /**
      * Before a record is deleted, check if it has references such as inline type or MM references.
      * If so, set these child records also to be deleted.
-     *
-     * @param string $table Record Table
-     * @param int $uid Record UID
-     * @see deleteRecord()
-     * @internal should only be used from within DataHandler
      */
-    public function deleteRecord_procFields($table, $uid): void
+    protected function deleteRecord_procFields(string $table, array $recordToDelete, bool $forceHardDelete = false): void
     {
-        $row = BackendUtility::getRecord($table, $uid, '*', '', false);
-        if (empty($row)) {
-            return;
-        }
         $schema = $this->tcaSchemaFactory->get($table);
-        foreach ($row as $field => $value) {
-            $configuration = $schema->hasField($field) ? $schema->getField($field)->getConfiguration() : [];
-            $this->deleteRecord_procBasedOnFieldType($table, $uid, $value, $configuration);
-        }
-    }
-
-    /**
-     * Process fields of a record to be deleted and search for special handling, like
-     * inline type, MM records, etc.
-     *
-     * @param string $table Record Table
-     * @param int $uid Record UID
-     * @param string $value Record field value
-     * @param array $conf TCA configuration of current field
-     * @see deleteRecord()
-     * @internal should only be used from within DataHandler
-     */
-    public function deleteRecord_procBasedOnFieldType($table, $uid, $value, $conf): void
-    {
-        if (!isset($conf['type'])) {
-            return;
-        }
-
-        if ($conf['type'] === 'inline' || $conf['type'] === 'file') {
-            if (in_array($this->getRelationFieldType($conf), ['list', 'field'], true)) {
-                $dbAnalysis = $this->createRelationHandlerInstance();
-                $dbAnalysis->start($value, $conf['foreign_table'], '', $uid, $table, $conf);
-                $dbAnalysis->undeleteRecord = true;
-
-                // non type save comparison is intended!
-                if (!isset($conf['behaviour']['enableCascadingDelete'])
-                    || $conf['behaviour']['enableCascadingDelete'] != false
-                ) {
-                    // Walk through the items and remove them
-                    foreach ($dbAnalysis->itemArray as $v) {
-                        $this->deleteAction($v['table'], $v['id']);
+        $uid = (int)$recordToDelete['uid'];
+        foreach ($recordToDelete as $fieldName => $value) {
+            if (!$schema->hasField($fieldName)) {
+                continue;
+            }
+            $configuration = $schema->getField($fieldName)->getConfiguration();
+            if (!isset($configuration['type'])) {
+                continue;
+            }
+            if ($configuration['type'] === 'inline' || $configuration['type'] === 'file') {
+                if (in_array($this->getRelationFieldType($configuration), ['list', 'field'], true)) {
+                    $dbAnalysis = $this->createRelationHandlerInstance();
+                    if ($forceHardDelete) {
+                        // @todo: This should be called "disableDeleteClause" or similar. Also, PlainDataResolver
+                        //        still applies deleteClause in processSorting() which can not be disabled.
+                        $dbAnalysis->undeleteRecord = true;
+                    }
+                    $dbAnalysis->start($value, $configuration['foreign_table'], '', $uid, $table, $configuration);
+                    // Non type save comparison is intended!
+                    if (!isset($configuration['behaviour']['enableCascadingDelete']) || $configuration['behaviour']['enableCascadingDelete'] != false) {
+                        // Walk through the items and remove them
+                        foreach ($dbAnalysis->itemArray as $v) {
+                            // @todo: It would be so much better when RelationHandler could return full rows ...
+                            $this->deleteAction($v['table'], (int)$v['id'], false, $forceHardDelete);
+                        }
                     }
                 }
-            }
-        } elseif ($this->isReferenceField($conf)) {
-            $allowedTables = $conf['type'] === 'group' ? $conf['allowed'] : $conf['foreign_table'];
-            $dbAnalysis = $this->createRelationHandlerInstance();
-            $dbAnalysis->start($value, $allowedTables, $conf['MM'] ?? '', $uid, $table, $conf);
-            foreach ($dbAnalysis->itemArray as $v) {
-                $this->updateRefIndex($v['table'], $v['id']);
+            } elseif ($this->isReferenceField($configuration)) {
+                $allowedTables = $configuration['type'] === 'group' ? $configuration['allowed'] : $configuration['foreign_table'];
+                if ($forceHardDelete && ($configuration['MM'] ?? false)) {
+                    // When hard deleting an MM record, MM rows must be removed. Note they are kept when
+                    // soft-deleting a local or foreign side record to allow undeleting the record and getting
+                    // connected MM relations back.
+                    $dbAnalysis = $this->createRelationHandlerInstance();
+                    $dbAnalysis->start('', $allowedTables, $configuration['MM'], $uid, $table, $configuration);
+                    $previousItemArray = $dbAnalysis->itemArray;
+                    $dbAnalysis->itemArray = [];
+                    $dbAnalysis->writeMM($configuration['MM'], $uid);
+                } else {
+                    $allowedTables = $configuration['type'] === 'group' ? $configuration['allowed'] : $configuration['foreign_table'];
+                    $dbAnalysis = $this->createRelationHandlerInstance();
+                    $dbAnalysis->start($value, $allowedTables, $configuration['MM'] ?? '', $uid, $table, $configuration);
+                    $previousItemArray = $dbAnalysis->itemArray;
+                }
+                foreach ($previousItemArray as $v) {
+                    $this->updateRefIndex($v['table'], $v['id']);
+                }
+            } elseif ($configuration['type'] === 'flex' && (string)$value !== '') {
+                try {
+                    $dataStructureIdentifier = $this->flexFormTools->getDataStructureIdentifier(
+                        ['config' => $configuration],
+                        $table,
+                        $fieldName,
+                        $recordToDelete
+                    );
+                    $dataStructureArray = $this->flexFormTools->parseDataStructureByIdentifier($dataStructureIdentifier);
+                } catch (AbstractInvalidDataStructureException) {
+                    // Nothing to do if data structure could not be determined
+                    continue;
+                }
+                if ($dataStructureArray !== []) {
+                    $flexForm = GeneralUtility::xml2array($value);
+                    foreach (($dataStructureArray['sheets'] ?? []) as $sheetName => $sheet) {
+                        foreach ($sheet['ROOT']['el'] as $sheetFieldName => $flexField) {
+                            $flexFormValue = $flexForm['data'][$sheetName]['lDEF'][$sheetFieldName]['vDEF'] ?? null;
+                            $flexFieldConfig = $flexField['config'] ?? [];
+                            if (!isset($flexFieldConfig['type'])) {
+                                continue;
+                            }
+                            if ($flexFieldConfig['type'] === 'inline' || $flexFieldConfig['type'] === 'file') {
+                                if (in_array($this->getRelationFieldType($flexFieldConfig), ['list', 'field'], true)) {
+                                    $dbAnalysis = $this->createRelationHandlerInstance();
+                                    if ($forceHardDelete) {
+                                        // @todo: This should be called "disableDeleteClause" or similar. Also, PlainDataResolver
+                                        //        still applies deleteClause in processSorting() which can not be disabled.
+                                        $dbAnalysis->undeleteRecord = true;
+                                    }
+                                    $dbAnalysis->start($flexFormValue, $flexFieldConfig['foreign_table'], '', $uid, $table, $flexFieldConfig);
+                                    // Non type save comparison is intended!
+                                    if (!isset($flexFieldConfig['behaviour']['enableCascadingDelete']) || $flexFieldConfig['behaviour']['enableCascadingDelete'] != false) {
+                                        // Walk through the items and remove them
+                                        foreach ($dbAnalysis->itemArray as $v) {
+                                            $this->deleteAction($v['table'], (int)$v['id'], false, $forceHardDelete);
+                                        }
+                                    }
+                                }
+                            } elseif ($this->isReferenceField($flexFieldConfig)) {
+                                $allowedTables = $flexFieldConfig['type'] === 'group' ? $flexFieldConfig['allowed'] : $flexFieldConfig['foreign_table'];
+                                $dbAnalysis = $this->createRelationHandlerInstance();
+                                $dbAnalysis->start($value, $allowedTables, $flexFieldConfig['MM'] ?? '', $uid, $table, $flexFieldConfig);
+                                foreach ($dbAnalysis->itemArray as $v) {
+                                    $this->updateRefIndex($v['table'], $v['id']);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -5718,11 +5874,9 @@ class DataHandler
     /**
      * Find l10n-overlay records and perform the requested delete action for these records.
      *
-     * @param string $table Record Table
-     * @param int $uid Record UID
      * @internal should only be used from within DataHandler
      */
-    public function deleteL10nOverlayRecords($table, $uid): void
+    public function deleteL10nOverlayRecords(string $table, int $uid, bool $forceHardDelete = false): void
     {
         $schema = $this->tcaSchemaFactory->get($table);
         // Check whether table can be localized
@@ -5734,10 +5888,11 @@ class DataHandler
         $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
 
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-        $queryBuilder->getRestrictions()->removeAll()
-            ->add(GeneralUtility::makeInstance(DeletedRestriction::class))
-            ->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, (int)$this->BE_USER->workspace));
-
+        $restrictions = $queryBuilder->getRestrictions()->removeAll()
+            ->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, $this->BE_USER->workspace));
+        if (!$forceHardDelete) {
+            $restrictions->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+        }
         $queryBuilder->select('*')
             ->from($table)
             ->where(
@@ -5751,21 +5906,15 @@ class DataHandler
         while ($record = $result->fetchAssociative()) {
             // Ignore workspace delete placeholders. Those records have been marked for
             // deletion before - deleting them again in a workspace would revert that state.
-            if ((int)$this->BE_USER->workspace > 0 && $schema->isWorkspaceAware()) {
+            if ($this->BE_USER->workspace > 0 && $schema->isWorkspaceAware()) {
                 BackendUtility::workspaceOL($table, $record, $this->BE_USER->workspace);
                 if (VersionState::tryFrom($record['t3ver_state'] ?? 0) === VersionState::DELETE_PLACEHOLDER) {
                     continue;
                 }
             }
-            $this->deleteAction($table, (int)($record['t3ver_oid'] ?? 0) > 0 ? (int)$record['t3ver_oid'] : (int)$record['uid']);
+            $this->deleteAction($table, (int)($record['t3ver_oid'] ?? 0) > 0 ? (int)$record['t3ver_oid'] : (int)$record['uid'], false, $forceHardDelete);
         }
     }
-
-    /*********************************************
-     *
-     * Cmd: undelete / restore
-     *
-     ********************************************/
 
     /**
      * Restore live records by setting soft-delete flag to 0.
@@ -5812,10 +5961,10 @@ class DataHandler
                     $table,
                     $uid,
                     SystemLogDatabaseAction::DELETE,
-                    0,
+                    null,
                     SystemLogErrorClassification::USER_ERROR,
                     'Record "{table}:{uid}" can\'t be restored: The page "{pid}" containing it does not exist or is soft-deleted',
-                    0,
+                    null,
                     [
                         'table' => $table,
                         'uid' => $uid,
@@ -5830,16 +5979,16 @@ class DataHandler
         // @todo: When restoring a not-default language record, it should be verified the default language
         // @todo: record is *not* set to deleted. Maybe even verify a possible l10n_source chain is not deleted?
 
-        if (!$this->BE_USER->recordEditAccessInternals($table, $record, false, true)) {
+        if (!$this->BE_USER->recordEditAccessInternals($table, $record, false, null)) {
             // User misses access permissions to record
             $this->log(
                 $table,
                 $uid,
                 SystemLogDatabaseAction::DELETE,
-                0,
+                null,
                 SystemLogErrorClassification::USER_ERROR,
                 'Record "{table}:{uid}" can\'t be restored: Insufficient user permissions',
-                0,
+                null,
                 [
                     'table' => $table,
                     'uid' => $uid,
@@ -5863,24 +6012,21 @@ class DataHandler
                 $updateFields,
                 ['uid' => $uid]
             );
-
-        if ($this->enableLogging) {
-            $this->log(
-                $table,
-                $uid,
-                SystemLogDatabaseAction::INSERT,
-                0,
-                SystemLogErrorClassification::MESSAGE,
-                'Record "{table}:{uid}" was restored on page {pid}',
-                0,
-                [
-                    'table' => $table,
-                    'uid' => $uid,
-                    'pid' => $recordPid,
-                ],
-                $recordPid
-            );
-        }
+        $this->log(
+            $table,
+            $uid,
+            SystemLogDatabaseAction::INSERT,
+            null,
+            SystemLogErrorClassification::MESSAGE,
+            'Record "{table}:{uid}" was restored on page {pid}',
+            null,
+            [
+                'table' => $table,
+                'uid' => $uid,
+                'pid' => $recordPid,
+            ],
+            $recordPid
+        );
 
         // Register cache clearing of page, or parent page if a page is restored.
         $this->registerRecordIdForPageCacheClearing($table, $uid, $recordPid);
@@ -5930,15 +6076,11 @@ class DataHandler
                     // @todo: Unsure if this is ok / enough. Needs coverage.
                     $this->updateRefIndex($reference['table'], $reference['id']);
                 }
+            } elseif ($fieldType === 'flex') {
+                // @todo: Implement undelete of relations within a FlexForm
             }
         }
     }
-
-    /*********************************************
-     *
-     * Cmd: Workspace discard & flush
-     *
-     ********************************************/
 
     /**
      * Discard a versioned record from this workspace. This deletes records from the database - no soft delete.
@@ -5951,9 +6093,8 @@ class DataHandler
      * @param string $table Database table name
      * @param int|null $uid Uid of live or versioned record to be discarded, or null if $record is given
      * @param array|null $record Record row that should be discarded. Used instead of $uid within recursion.
-     * @internal should only be used from within DataHandler
      */
-    public function discard(string $table, ?int $uid, ?array $record = null): void
+    protected function discard(string $table, ?int $uid, ?array $record = null): void
     {
         if ($uid === null && $record === null) {
             throw new \RuntimeException('Either record $uid or $record row must be given', 1600373491);
@@ -5978,11 +6119,10 @@ class DataHandler
             }
         }
 
-        $userWorkspace = (int)$this->BE_USER->workspace;
+        $userWorkspace = $this->BE_USER->workspace;
         if ($recordWasDiscarded
             || $userWorkspace === 0
             || !BackendUtility::isTableWorkspaceEnabled($table)
-            || $this->hasDeletedRecord($table, $uid)
         ) {
             return;
         }
@@ -5996,22 +6136,29 @@ class DataHandler
         }
         $versionRecord = $record;
 
+        $pageRecord = [];
+        if ($table === 'pages') {
+            $pageRecord = $versionRecord;
+        } elseif ((int)$versionRecord['pid'] > 0) {
+            $pageRecord = BackendUtility::getRecord('pages', $versionRecord['pid']) ?? [];
+        }
+
         // User access checks
         if ($userWorkspace !== (int)$versionRecord['t3ver_wsid']) {
-            $this->log($table, $versionRecord['uid'], SystemLogDatabaseAction::DISCARD, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to discard workspace record {table}:{uid} failed: Different workspace', -1, ['table' => $table, 'uid' => (int)$versionRecord['uid']]);
+            $this->log($table, $versionRecord['uid'], SystemLogDatabaseAction::DISCARD, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to discard workspace record {table}:{uid} failed: Different workspace', null, ['table' => $table, 'uid' => (int)$versionRecord['uid']]);
             return;
         }
         if ($errorCode = $this->workspaceCannotEditOfflineVersion($table, $versionRecord)) {
-            $this->log($table, $versionRecord['uid'], SystemLogDatabaseAction::DISCARD, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to discard workspace record {table}:{uid} failed: {reason}', -1, ['table' => $table, 'uid' => (int)$versionRecord['uid'], 'reason' => $errorCode]);
+            $this->log($table, $versionRecord['uid'], SystemLogDatabaseAction::DISCARD, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to discard workspace record {table}:{uid} failed: {reason}', null, ['table' => $table, 'uid' => (int)$versionRecord['uid'], 'reason' => $errorCode]);
             return;
         }
-        if (!$this->checkRecordUpdateAccess($table, $versionRecord['uid'])) {
-            $this->log($table, $versionRecord['uid'], SystemLogDatabaseAction::DISCARD, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to discard workspace record {table}:{uid} failed: User has no edit access', -1, ['table' => $table, 'uid' => (int)$versionRecord['uid']]);
+        if (!$this->hasPermissionToUpdate($table, $pageRecord)) {
+            $this->log($table, $versionRecord['uid'], SystemLogDatabaseAction::DISCARD, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to discard workspace record {table}:{uid} failed: User has no edit access', null, ['table' => $table, 'uid' => (int)$versionRecord['uid']]);
             return;
         }
         $fullLanguageAccessCheck = !($table === 'pages' && (int)$versionRecord[$this->tcaSchemaFactory->get('pages')->getCapability(TcaSchemaCapability::Language)->getTranslationOriginPointerField()->getName()] !== 0);
-        if (!$this->BE_USER->recordEditAccessInternals($table, $versionRecord, false, true, $fullLanguageAccessCheck)) {
-            $this->log($table, $versionRecord['uid'], SystemLogDatabaseAction::DISCARD, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to discard workspace record {table}:{uid} failed: User has no delete access', -1, ['table' => $table, 'uid' => (int)$versionRecord['uid']]);
+        if (!$this->BE_USER->recordEditAccessInternals($table, $versionRecord, false, null, $fullLanguageAccessCheck)) {
+            $this->log($table, $versionRecord['uid'], SystemLogDatabaseAction::DISCARD, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to discard workspace record {table}:{uid} failed: User has no delete access', null, ['table' => $table, 'uid' => (int)$versionRecord['uid']]);
             return;
         }
 
@@ -6027,17 +6174,16 @@ class DataHandler
         $this->discardRecordRelations($table, $versionRecord);
         $this->discardCsvReferencesToRecord($table, $versionRecord);
         $this->hardDeleteSingleRecord($table, (int)$versionRecord['uid']);
-        $this->deletedRecords[$table][] = (int)$versionRecord['uid'];
         $this->registerReferenceIndexRowsForDrop($table, (int)$versionRecord['uid'], $userWorkspace);
         $this->getRecordHistoryStore()->deleteRecord($table, (int)$versionRecord['uid'], $this->correlationId);
         $this->log(
             $table,
             (int)$versionRecord['uid'],
             SystemLogDatabaseAction::DELETE,
-            0,
+            null,
             SystemLogErrorClassification::MESSAGE,
             'Record {table}:{uid} was deleted unrecoverable from page {pid}',
-            0,
+            null,
             ['table' => $table, 'uid' => $versionRecord['uid'], 'pid' => $versionRecord['pid']],
             (int)$versionRecord['pid']
         );
@@ -6083,7 +6229,7 @@ class DataHandler
                 continue;
             }
             $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-            $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
+            $queryBuilder->getRestrictions()->removeAll();
             $queryBuilder->select('*')
                 ->from($table)
                 ->where(
@@ -6123,12 +6269,12 @@ class DataHandler
     protected function discardRecordRelations(string $table, array $record): void
     {
         $schema = $this->tcaSchemaFactory->get($table);
-        foreach ($record as $field => $value) {
-            if (!$schema->hasField($field)) {
+        foreach ($record as $fieldName => $value) {
+            if (!$schema->hasField($fieldName)) {
                 continue;
             }
             /** @var InlineFieldType|FileFieldType $fieldType */
-            $fieldType = $schema->getField($field);
+            $fieldType = $schema->getField($fieldName);
             $fieldConfig = $fieldType->getConfiguration();
 
             if ($fieldType->isType(TableColumnType::INLINE, TableColumnType::FILE)) {
@@ -6149,8 +6295,38 @@ class DataHandler
                 }
             } elseif ($this->isReferenceField($fieldConfig) && !empty($fieldConfig['MM'])) {
                 $this->discardMmRelations($table, $fieldConfig, $record);
+            } elseif ($fieldType->isType(TableColumnType::FLEX) && (string)$value !== '') {
+                try {
+                    $dataStructureIdentifier = $this->flexFormTools->getDataStructureIdentifier(['config' => $fieldConfig], $table, $fieldName, $record);
+                    $dataStructureArray = $this->flexFormTools->parseDataStructureByIdentifier($dataStructureIdentifier);
+                } catch (AbstractInvalidDataStructureException) {
+                    // Nothing to do if data structure could not be determined
+                    continue;
+                }
+                if ($dataStructureArray !== []) {
+                    $flexForm = GeneralUtility::xml2array($value);
+                    foreach (($dataStructureArray['sheets'] ?? []) as $sheetName => $sheet) {
+                        foreach ($sheet['ROOT']['el'] as $sheetFieldName => $flexField) {
+                            $flexFormValue = $flexForm['data'][$sheetName]['lDEF'][$sheetFieldName]['vDEF'] ?? null;
+                            $flexFieldConfig = $flexField['config'] ?? [];
+                            if (!isset($flexFieldConfig['type'])) {
+                                continue;
+                            }
+                            if ($flexFieldConfig['type'] === 'inline' || $flexFieldConfig['type'] === 'file') {
+                                if (in_array($this->getRelationFieldType($flexFieldConfig), ['list', 'field'], true)) {
+                                    $dbAnalysis = $this->createRelationHandlerInstance();
+                                    $dbAnalysis->start($flexFormValue, $flexFieldConfig['foreign_table'], '', (int)$record['uid'], $table, $flexFieldConfig);
+                                    foreach ($dbAnalysis->itemArray as $relationRecord) {
+                                        $this->discard($relationRecord['table'], (int)$relationRecord['id']);
+                                    }
+                                }
+                            } elseif ($this->isReferenceField($flexFieldConfig) && !empty($flexFieldConfig['MM'])) {
+                                $this->discardMmRelations($table, $flexFieldConfig, $record);
+                            }
+                        }
+                    }
+                }
             }
-            // @todo not inline and not mm - probably not handled correctly and has no proper test coverage yet
         }
     }
 
@@ -6284,7 +6460,7 @@ class DataHandler
         $languageCapability = $schema->getCapability(TcaSchemaCapability::Language);
         $uid = (int)$record['uid'];
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-        $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
+        $queryBuilder->getRestrictions()->removeAll();
         $statement = $queryBuilder->select('*')
             ->from($table)
             ->where(
@@ -6303,58 +6479,104 @@ class DataHandler
         }
     }
 
-    /*********************************************
-     *
-     * Cmd: Versioning
-     *
-     ********************************************/
     /**
-     * Creates a new version of a record
-     * (Requires support in the table)
+     * Creates a new version of a record if the table is workspace aware.
      *
-     * @param string $table Table name
-     * @param int $id Record uid to versionize
+     * @param int $id Live record uid to create a versioned record from
      * @param string $label Version label
      * @param bool $delete If TRUE, the version is created to delete the record.
      * @return int|null Returns the id of the new version (if any)
-     * @see copyRecord()
      * @internal should only be used from within DataHandler
      */
-    public function versionizeRecord($table, $id, $label, $delete = false)
+    public function versionizeRecord($table, $id, $label, $delete = false): ?int
     {
         $schema = $this->tcaSchemaFactory->get($table);
         $id = (int)$id;
-        // Stop any actions if the record is marked to be deleted:
-        // (this can occur if IRRE elements are versionized and child elements are removed)
         if ($this->isElementToBeDeleted($table, $id)) {
+            // Stop if the record is marked to be deleted. Can happen when IRRE elements are versioned and children are removed
             return null;
         }
         if (!$schema->isWorkspaceAware() || $id <= 0) {
-            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Versioning is not supported for this table {table}:{uid}', -1, ['table' => $table, 'uid' => (int)$id]);
+            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Versioning is not supported for this table {table}:{uid}', null, ['table' => $table, 'uid' => (int)$id]);
             return null;
         }
 
-        // Fetch record with permission check
-        $row = $this->recordInfoWithPermissionCheck($table, $id, Permission::PAGE_SHOW);
-
-        // This checks if the record can be selected which is all that a copy action requires.
-        if ($row === false) {
-            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, 0, SystemLogErrorClassification::USER_ERROR, 'The record does not exist or you don\'t have correct permissions to make a new version (copy) of this record "{table}:{uid}"', -1, ['table' => $table, 'uid' => (int)$id]);
+        $row = BackendUtility::getRecord($table, $id);
+        if (!is_array($row)) {
+            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to create workspace version of "{table}:{uid}" which does not exist', null, ['table' => $table, 'uid' => (int)$id]);
+            return null;
+        }
+        BackendUtility::workspaceOL($table, $row, $this->BE_USER->workspace);
+        $pageRecord = [];
+        if ($table === 'pages') {
+            $pageRecord = $row;
+        } elseif ((int)$row['pid'] > 0) {
+            $pageRecord = BackendUtility::getRecord('pages', $row['pid']);
+            if (!is_array($pageRecord)) {
+                $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to create workspace version of "{table}:{uid}" which is not assigned to a valid page', null, ['table' => $table, 'uid' => (int)$id]);
+                return null;
+            }
+        }
+        if (!$this->hasPagePermission(Permission::PAGE_SHOW, $pageRecord)) {
+            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to create workspace version of "{table}:{uid}" without read permissions', null, ['table' => $table, 'uid' => (int)$id]);
             return null;
         }
 
-        // Record must be online record, otherwise we would create a version of a version
         if (($row['t3ver_oid'] ?? 0) > 0) {
-            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Record "{table}:{uid}" you wanted to versionize was already a version in archive (record has an online ID)', -1, ['table' => $table, 'uid' => (int)$id]);
+            // Record must be online record, otherwise we would create a version of a version
+            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Record "{table}:{uid}" you wanted to versionize was already a version in archive (record has an online ID)', null, ['table' => $table, 'uid' => (int)$id]);
+            return null;
+        }
+        if ($delete) {
+            if ($table === 'pages') {
+                $pagesLanguageCapability = $this->tcaSchemaFactory->get('pages')->getCapability(TcaSchemaCapability::Language);
+                $pagesLocalizationParentFieldName = $pagesLanguageCapability->getTranslationOriginPointerField()->getName();
+                $pagesLocalizationParent = (int)($pageRecord[$pagesLocalizationParentFieldName] ?? 0);
+                $defaultLanguagePage = $pageRecord;
+                $subPages = [];
+                if ($pagesLocalizationParent === 0) {
+                    // When deleting a default language page, user has to have delete permission on subpages as well.
+                    $subPages = $this->getSubPagesOfPage($id);
+                } else {
+                    $defaultLanguagePage = BackendUtility::getRecord('pages', $pagesLocalizationParent, '*', '', false);
+                    if ($defaultLanguagePage === null) {
+                        $this->log($table, $id, SystemLogDatabaseAction::DELETE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'Can not delete localized "pages:{uid}" in workspaces, default language page record "pages:{localizationParent}" not found', null, ['uid' => $id, 'localizationParent' => $pagesLocalizationParent], 0);
+                        return null;
+                    }
+                }
+                if (is_string($pageDeletePermissionError = $this->canDeletePage($pageRecord, $defaultLanguagePage, $subPages))) {
+                    $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Record {table}:{uid} cannot be deleted: {reason}', null, ['table' => $table, 'uid' => (int)$id, 'reason' => $pageDeletePermissionError]);
+                    return null;
+                }
+            } else {
+                $perms = Permission::CONTENT_EDIT;
+                if ($table === 'sys_file_reference' && array_key_exists('pages', $this->datamap)) {
+                    // @todo: find a more generic way to handle content relations of a page (without needing content editing access to that page)
+                    $perms = Permission::PAGE_EDIT;
+                }
+                if (!$this->hasPagePermission($perms, $pageRecord)) {
+                    $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, null, SystemLogErrorClassification::USER_ERROR, 'Record {table}:{uid} cannot be deleted due to missing edit permissions', null, ['table' => $table, 'uid' => (int)$id]);
+                    return null;
+                }
+            }
+        }
+        if ($this->BE_USER->workspace <= 0) {
+            // User must be in workspace at this point, we may otherwise end up with workspace related records in live.
+            // @todo: Maybe raise this to an exception?
             return null;
         }
 
-        if ($delete && $errorCode = $this->cannotDeleteRecord($table, $id)) {
-            $this->log($table, $id, SystemLogDatabaseAction::VERSIONIZE, 0, SystemLogErrorClassification::USER_ERROR, 'Record {table}:{uid} cannot be deleted: {reason}', -1, ['table' => $table, 'uid' => (int)$id, 'reason' => $errorCode]);
-            return null;
+        // Check if the record already has a version in the current workspace of the backend user
+        $versionRecord = BackendUtility::getWorkspaceVersionOfRecord($this->BE_USER->workspace, $table, $id, 'uid');
+        if ($versionRecord) {
+            return (int)$versionRecord['uid'];
         }
 
-        // Set up the values to override when making a raw-copy:
+        // Create new version of the record and return the new uid
+        // The information of the label to be used for the workspace record
+        // as well as the information whether the record shall be removed
+        // must be forwarded (creating delete placeholders on a workspace are
+        // done by copying the record and override several fields).
         $overrideArray = [
             't3ver_oid' => $id,
             't3ver_wsid' => $this->BE_USER->workspace,
@@ -6364,29 +6586,11 @@ class DataHandler
         if ($schema->hasCapability(TcaSchemaCapability::EditLock)) {
             $overrideArray[$schema->getCapability(TcaSchemaCapability::EditLock)->getFieldName()] = 0;
         }
-        // Checking if the record already has a version in the current workspace of the backend user
-        $versionRecord = ['uid' => null];
-        if ($this->BE_USER->workspace !== 0) {
-            // Look for version already in workspace:
-            $versionRecord = BackendUtility::getWorkspaceVersionOfRecord($this->BE_USER->workspace, $table, $id, 'uid');
-        }
-        // Create new version of the record and return the new uid
-        if (empty($versionRecord['uid'])) {
-            // Create raw-copy and return result:
-            // The information of the label to be used for the workspace record
-            // as well as the information whether the record shall be removed
-            // must be forwarded (creating delete placeholders on a workspace are
-            // done by copying the record and override several fields).
-            $workspaceOptions = [
-                'delete' => $delete,
-                'label' => $label,
-            ];
-            return $this->copyRecord_raw($table, $id, (int)$row['pid'], $overrideArray, $workspaceOptions);
-        }
-        // Reuse the existing record and return its uid
-        // (prior to TYPO3 CMS 6.2, an error was thrown here, which
-        // did not make much sense since the information is available)
-        return $versionRecord['uid'];
+        $workspaceOptions = [
+            'delete' => $delete,
+            'label' => $label,
+        ];
+        return $this->copyRecord_raw($table, $id, (int)$row['pid'], $overrideArray, $workspaceOptions);
     }
 
     /**
@@ -6549,12 +6753,6 @@ class DataHandler
         return empty($config['MM_opposite_field']);
     }
 
-    /*********************************************
-     *
-     * Cmd: Helper functions
-     *
-     ********************************************/
-
     /**
      * Returns an instance of DataHandler for handling local datamaps/cmdmaps
      */
@@ -6599,9 +6797,9 @@ class DataHandler
                             case 'flex':
                                 if ($value === 'FlexForm_reference') {
                                     // This will fetch the new row for the element
-                                    $origRecordRow = $this->recordInfo($table, $theUidToUpdate);
+                                    $origRecordRow = BackendUtility::getRecord($table, $theUidToUpdate, '*', '', false);
                                     if (is_array($origRecordRow)) {
-                                        BackendUtility::workspaceOL($table, $origRecordRow);
+                                        BackendUtility::workspaceOL($table, $origRecordRow, $this->BE_USER->workspace);
                                         // Get current data structure and value array:
                                         $dataStructureIdentifier = $this->flexFormTools->getDataStructureIdentifier(
                                             ['config' => $fieldType->getConfiguration()],
@@ -6632,7 +6830,10 @@ class DataHandler
                     }
                     // If any fields were changed, those fields are updated!
                     if (!empty($newData)) {
-                        $this->updateDB($table, $theUidToUpdate_saveTo, $newData);
+                        // @todo: It would be better to have the current record at hand here already, at least its pid.
+                        //        This will require changing structure of $this->registerDBList.
+                        $currentRecord = BackendUtility::getRecord($table, $theUidToUpdate_saveTo, 'pid', '', false);
+                        $this->updateDB($table, $theUidToUpdate_saveTo, $newData, (int)$currentRecord['pid']);
                     }
                 }
             }
@@ -6705,7 +6906,6 @@ class DataHandler
             if ($dbAnalysis->isPurged()) {
                 $set = true;
             }
-
             // If record has been versioned/copied in this process, handle invalid relations of the live record
             $liveId = BackendUtility::getLiveVersionIdOfRecord($table, $MM_localUid);
             $originalId = 0;
@@ -6941,7 +7141,16 @@ class DataHandler
                 if ($schema->hasCapability(TcaSchemaCapability::UpdatedAt)) {
                     $fieldArray[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
                 }
-                $this->updateDB($table, $id, $fieldArray);
+                // @todo: It would be better if we'd receive at least the pid somehow here without fetching
+                //        the record again. OTOH, we could also reduce this overhead by getting rid of the
+                //        "parent count" fields altogether, but that's a much more intrusive change.
+                //        For now, we BU::getRecord() the current record explicitly to determine the current
+                //        pid, which is needed at least for proper log records, plus it could make cache
+                //        clearing in updateDB() more effective if used systematically.
+                $currentRecord = BackendUtility::getRecord($table, $id, '*', '', false);
+                if (!empty($currentRecord)) {
+                    $this->updateDB($table, $id, $fieldArray, (int)$currentRecord['pid']);
+                }
             } elseif (!empty($additionalData['flexFormId']) && !empty($additionalData['flexFormPath'])) {
                 // Collect data to update FlexForms
                 $flexFormId = $additionalData['flexFormId'];
@@ -7014,11 +7223,11 @@ class DataHandler
         if (!MathUtility::canBeInterpretedAsInteger($uid) && !empty($this->substNEWwithIDs[$uid])) {
             $uid = $this->substNEWwithIDs[$uid];
         }
-        $record = $this->recordInfo($table, $uid);
+        $record = BackendUtility::getRecord($table, $uid, '*', '', false);
         if (!$table || !$uid || !$field || !is_array($record)) {
             return;
         }
-        BackendUtility::workspaceOL($table, $record);
+        BackendUtility::workspaceOL($table, $record, $this->BE_USER->workspace);
         // Get current data structure and value array:
         $valueStructure = GeneralUtility::xml2array($record[$field]);
         // Do recursive processing of the XML data:
@@ -7034,7 +7243,7 @@ class DataHandler
             $values = [
                 $field => $this->flexFormTools->flexArray2Xml($valueStructure),
             ];
-            $this->updateDB($table, $uid, $values);
+            $this->updateDB($table, $uid, $values, (int)$record['pid']);
         }
     }
 
@@ -7100,6 +7309,25 @@ class DataHandler
     }
 
     /**
+     * Straight db based record deletion:
+     * Either set deleted = 1 for soft-delete enabled tables, or remove row from table.
+     */
+    protected function softOrHardDeleteSingleRecord(string $table, int $uid): void
+    {
+        $schema = $this->tcaSchemaFactory->get($table);
+        if ($schema->hasCapability(TcaSchemaCapability::SoftDelete)) {
+            $this->connectionPool->getConnectionForTable($table)->update(
+                $table,
+                [$schema->getCapability(TcaSchemaCapability::SoftDelete)->getFieldName() => 1],
+                ['uid' => $uid],
+                [Connection::PARAM_INT]
+            );
+        } else {
+            $this->hardDeleteSingleRecord($table, $uid);
+        }
+    }
+
+    /**
      * Simple helper method to hard delete one row from table ignoring delete TCA field
      *
      * @param string $table A row from this table should be deleted
@@ -7111,165 +7339,97 @@ class DataHandler
             ->delete($table, ['uid' => $uid], [Connection::PARAM_INT]);
     }
 
-    /*****************************
-     *
-     * Access control / Checking functions
-     *
-     *****************************/
     /**
-     * Checking group modify_table access list
-     *
-     * @param string $table Table name
-     * @return bool Returns TRUE if the user has general access to modify the $table
-     * @internal should only be used from within DataHandler
+     * Check user/group for modify table permission of a given table.
      */
-    public function checkModifyAccessList($table)
+    protected function checkModifyAccessList(string $table): bool
     {
-        $adminOnly = $this->tcaSchemaFactory->has($table) ? $this->tcaSchemaFactory->get($table)->hasCapability(TcaSchemaCapability::AccessAdminOnly) : false;
-        $res = $this->admin || (!$adminOnly && isset($this->BE_USER->groupData['tables_modify']) && GeneralUtility::inList($this->BE_USER->groupData['tables_modify'], $table));
-        // Hook 'checkModifyAccessList': Post-processing of the state of access
-        foreach ($this->getCheckModifyAccessListHookObjects() as $hookObject) {
-            /** @var DataHandlerCheckModifyAccessListHookInterface $hookObject */
-            $hookObject->checkModifyAccessList($res, $table, $this);
-        }
-        return $res;
-    }
-
-    /**
-     * Checking if a record with uid $id from $table is in the BE_USERS webmounts which is required for editing etc.
-     *
-     * @param string $table Table name
-     * @param int $id UID of record
-     * @return bool Returns TRUE if OK. Cached results.
-     * @internal should only be used from within DataHandler
-     */
-    public function isRecordInWebMount($table, $id)
-    {
-        if (!isset($this->isRecordInWebMount_Cache[$table . ':' . $id])) {
-            $recP = $this->getRecordProperties($table, $id);
-            $this->isRecordInWebMount_Cache[$table . ':' . $id] = $this->isInWebMount($recP['event_pid']);
-        }
-        return $this->isRecordInWebMount_Cache[$table . ':' . $id];
-    }
-
-    /**
-     * Checks if the input page ID is in the BE_USER webmounts
-     *
-     * @param int $pid Page ID to check
-     * @return bool TRUE if OK. Cached results.
-     * @internal should only be used from within DataHandler
-     */
-    public function isInWebMount($pid)
-    {
-        if (!isset($this->isInWebMount_Cache[$pid])) {
-            $this->isInWebMount_Cache[$pid] = $this->BE_USER->isInWebMount($pid);
-        }
-        return $this->isInWebMount_Cache[$pid];
-    }
-
-    /**
-     * Checks if user may update a record with uid=$id from $table
-     *
-     * @param string $table Record table
-     * @param int $id Record UID
-     * @return bool Returns TRUE if the user may update the record given by $table and $id
-     * @internal should only be used from within DataHandler
-     */
-    public function checkRecordUpdateAccess($table, $id)
-    {
-        $res = false;
-        if ($this->tcaSchemaFactory->has($table) && (int)$id > 0) {
-            $cacheId = 'checkRecordUpdateAccess_' . $table . '_' . $id;
-            // If information is cached, return it
-            $cachedValue = $this->runtimeCache->get($cacheId);
-            if (!empty($cachedValue)) {
-                // @todo: This cache is at least broken with false results.
-                //        Caching 'false' as result below makes !empty() here never kick in, so
-                //        caching negative result does not work and always triggers code execution.
-                //        Also, CF tends to mix up false as cache-value with 'there is no cache entry',
-                //        depending on used cache backend, which also may be the reason int 1 is used
-                //        instead of bool true, so '@return bool' annotation is clearly invalid.
-                //        Note there is another cache in doesRecordExist_pageLookUp() code path, too.
-                return $cachedValue;
+        $isTableAdminOnly = $this->tcaSchemaFactory->has($table) && $this->tcaSchemaFactory->get($table)->hasCapability(TcaSchemaCapability::AccessAdminOnly);
+        $isAccessAllowed = $this->admin || (!$isTableAdminOnly && isset($this->BE_USER->groupData['tables_modify']) && GeneralUtility::inList($this->BE_USER->groupData['tables_modify'], $table));
+        foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['checkModifyAccessList'] ?? [] as $className) {
+            $hookObject = GeneralUtility::makeInstance($className);
+            if (!$hookObject instanceof DataHandlerCheckModifyAccessListHookInterface) {
+                throw new \UnexpectedValueException($className . ' must implement interface ' . DataHandlerCheckModifyAccessListHookInterface::class, 1251892472);
             }
-            if ($table === 'pages' || ($table === 'sys_file_reference' && array_key_exists('pages', $this->datamap))) {
-                // @todo: find a more generic way to handle content relations of a page (without needing content editing access to that page)
-                $perms = Permission::PAGE_EDIT;
-            } else {
-                $perms = Permission::CONTENT_EDIT;
-            }
-            if ($this->doesRecordExist($table, $id, $perms)) {
-                $res = 1;
-            }
-            // Cache the result
-            $this->runtimeCache->set($cacheId, $res);
+            $hookObject->checkModifyAccessList($isAccessAllowed, $table, $this);
         }
-        return $res;
+        return $isAccessAllowed;
     }
 
     /**
-     * Checks if user may insert a record from $insertTable on $pid
+     * Checks if user may update a record $table on given page record
      *
-     * @param string $insertTable Tablename to check
-     * @param int $pid Integer PID
-     * @param int $action For logging: Action number.
-     * @return bool Returns TRUE if the user may insert a record from table $insertTable on page $pid
-     * @internal should only be used from within DataHandler
+     * @internal Strictly internal. May change or vanish any time.
      */
-    public function checkRecordInsertAccess($insertTable, $pid, $action = SystemLogDatabaseAction::INSERT)
+    public function hasPermissionToUpdate(string $table, array $pageRecord): bool
     {
-        $pid = (int)$pid;
-        if ($pid < 0) {
+        if (!$this->tcaSchemaFactory->has($table)) {
             return false;
         }
-        // If information is cached, return it
-        if (isset($this->recInsertAccessCache[$insertTable][$pid])) {
-            return $this->recInsertAccessCache[$insertTable][$pid];
-        }
-
-        $res = false;
-        if ($insertTable === 'pages') {
-            $perms = Permission::PAGE_NEW;
-        } elseif (($insertTable === 'sys_file_reference') && array_key_exists('pages', $this->datamap)) {
+        if ($table === 'pages' || ($table === 'sys_file_reference' && array_key_exists('pages', $this->datamap))) {
             // @todo: find a more generic way to handle content relations of a page (without needing content editing access to that page)
             $perms = Permission::PAGE_EDIT;
         } else {
             $perms = Permission::CONTENT_EDIT;
         }
-        $pageExists = (bool)$this->doesRecordExist('pages', $pid, $perms);
-        // If either admin and root-level or if page record exists and 1) if 'pages' you may create new ones 2) if page-content, new content items may be inserted on the $pid page
-        if ($pageExists || $pid === 0 && ($this->admin || BackendUtility::isRootLevelRestrictionIgnored($insertTable))) {
-            // Check permissions
-            if ($this->isTableAllowedForThisPage($pid, $insertTable)) {
-                $res = true;
-                // Cache the result
-                $this->recInsertAccessCache[$insertTable][$pid] = $res;
-            } elseif ($this->enableLogging) {
-                $propArr = $this->getRecordProperties('pages', $pid);
-                $this->log($insertTable, $pid, $action, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert record on page "{pageTitle}" ({pid}) where table "{table}" is not allowed', 11, ['pageTitle' => $propArr['header'], 'pid' => $pid, 'table' => $insertTable], $propArr['event_pid']);
-            }
-        } elseif ($this->enableLogging) {
-            $propArr = $this->getRecordProperties('pages', $pid);
-            $this->log($insertTable, $pid, $action, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert a record on page "{pageTitle}" ({pid}) from table "{table}" without permissions or non-existing page', 12, ['pageTitle' => $propArr['header'], 'pid' => $pid, 'table' => $insertTable], $propArr['event_pid']);
+        if (!$this->hasPagePermission($perms, $pageRecord)) {
+            return false;
         }
-        return $res;
+        return true;
+    }
+
+    /**
+     * Checks if user may insert a record from $table on $pid
+     *
+     * @param int $pid Integer PID
+     */
+    protected function hasPermissionToInsert($table, $pid, array $pageRecord, int $language = 0): bool
+    {
+        $pid = (int)$pid;
+        if ($table === 'pages' && $language > 0) {
+            // Localizing a page is treated as "PAGE_EDIT": This is not about creating a new sub-page which
+            // needs "PAGE_NEW". We want to be able to allow editors to create page localization of existing
+            // pages, while at the same time disallow creating new sub-pages.
+            $perms = Permission::PAGE_EDIT;
+        } elseif ($table === 'pages') {
+            $perms = Permission::PAGE_NEW;
+        } elseif (($table === 'sys_file_reference') && array_key_exists('pages', $this->datamap)) {
+            // @todo: find a more generic way to handle content relations of a page (without needing content editing access to that page)
+            $perms = Permission::PAGE_EDIT;
+        } else {
+            $perms = Permission::CONTENT_EDIT;
+        }
+        if (($pid !== 0 || (!$this->admin && !BackendUtility::isRootLevelRestrictionIgnored($table)))
+            && !$this->hasPagePermission($perms, $pageRecord)
+        ) {
+            // If page does not exist, it can still be an attempt to add to pid 0. Check this case
+            // and deny record insert by looking at admin flag and TCA root level restriction as well.
+            return false;
+        }
+        if (!$this->isTableAllowedForThisPage($pid, $table, $pageRecord)) {
+            return false;
+        }
+        return true;
     }
 
     /**
      * Checks if a table is allowed on a certain page id according to allowed tables set for the page "doktype" and its [ctrl][rootLevel]-settings if any.
      *
      * @param int $pageUid Page id for which to check, including 0 (zero) if checking for page tree root.
-     * @param string $checkTable Table name to check
+     * @param string $table Table name to check
      * @return bool TRUE if OK
-     * @internal should only be used from within DataHandler
      */
-    protected function isTableAllowedForThisPage(int $pageUid, $checkTable): bool
+    protected function isTableAllowedForThisPage(int $pageUid, string $table, array $pageRecord): bool
     {
-        $schema = $this->tcaSchemaFactory->get($checkTable);
+        $schema = $this->tcaSchemaFactory->get($table);
         /** @var RootLevelCapability $rootLevelCapability */
         $rootLevelCapability = $schema->getCapability(TcaSchemaCapability::RestrictionRootLevel);
-        // Check if rootLevel flag is set and we're trying to insert on rootLevel - and reversed - and that the table is not "pages" which are allowed anywhere.
-        if ($checkTable !== 'pages' && $rootLevelCapability->getRootLevelType() !== RootLevelCapability::TYPE_BOTH && ($rootLevelCapability->getRootLevelType() xor !$pageUid)) {
+        // Check if rootLevel flag is set, and we're trying to insert on rootLevel - and reversed - and
+        // that the table is not "pages" which are allowed anywhere.
+        if ($table !== 'pages'
+            && $rootLevelCapability->getRootLevelType() !== RootLevelCapability::TYPE_BOTH
+            && ($rootLevelCapability->getRootLevelType() xor !$pageUid)
+        ) {
             return false;
         }
         $allowed = false;
@@ -7281,98 +7441,53 @@ class DataHandler
             return $allowed;
         }
         // Check non-root-level
-        $doktype = $this->pageInfo($pageUid, 'doktype');
-        return $this->pageDoktypeRegistry->isRecordTypeAllowedForDoktype($checkTable, (int)$doktype);
-    }
-
-    /**
-     * Checks if record can be selected based on given permission criteria
-     *
-     * @param string $table Record table name
-     * @param int $id Record UID
-     * @param int $perms Permission restrictions to observe: integer that will be bitwise AND'ed.
-     * @return bool Returns TRUE if the record given by $table, $id and $perms can be selected
-     *
-     * @throws \RuntimeException
-     * @internal should only be used from within DataHandler
-     */
-    public function doesRecordExist($table, $id, int $perms): bool
-    {
-        return $this->recordInfoWithPermissionCheck($table, $id, $perms, 'uid, pid') !== false;
-    }
-
-    /**
-     * Looks up a page based on permissions.
-     *
-     * @param int $id Page id
-     * @param int $perms Permission integer
-     * @param array $columns Columns to select
-     * @internal
-     * @see doesRecordExist()
-     */
-    protected function doesRecordExist_pageLookUp($id, $perms, $columns = ['uid']): array|false
-    {
-        $permission = new Permission($perms);
-        $queryBuilder = $this->connectionPool->getQueryBuilderForTable('pages');
-        $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
-        $queryBuilder
-            ->select(...$columns)
-            ->from('pages')
-            ->where($queryBuilder->expr()->eq(
-                'uid',
-                $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)
-            ));
-        if (!$permission->nothingIsGranted() && !$this->admin) {
-            $queryBuilder->andWhere($this->BE_USER->getPagePermsClause($perms));
-        }
-        $pagesSchema = $this->tcaSchemaFactory->get('pages');
-        if (!$this->admin && $pagesSchema->hasCapability(TcaSchemaCapability::EditLock) &&
-            ($permission->editPagePermissionIsGranted() || $permission->deletePagePermissionIsGranted() || $permission->editContentPermissionIsGranted())
-        ) {
-            $queryBuilder->andWhere($queryBuilder->expr()->eq(
-                $pagesSchema->getCapability(TcaSchemaCapability::EditLock)->getFieldName(),
-                $queryBuilder->createNamedParameter(0, Connection::PARAM_INT)
-            ));
-        }
-        return $queryBuilder->executeQuery()->fetchAssociative();
+        return $this->pageDoktypeRegistry->isRecordTypeAllowedForDoktype($table, (int)$pageRecord['doktype']);
     }
 
     /**
      * Checks if a whole branch of pages exists.
      *
-     * Tests the branch under $pid like doesRecordExist(), but it doesn't test the page with $pid as uid - use doesRecordExist() for this purpose.
+     * Tests the branch under $pid. It doesn't test the page with $pid as uid.
      *
-     * @param int $pid Page ID to select subpages from.
-     * @param int $permissions Perms integer to check each page record for.
-     * @param array $pageIdsInBranch List of page uids, this is added to and returned in the end
-     * @return array<int>|null List of page IDs in branch, if there are subpages, empty array if there are none or null if no permission
-     * @internal should only be used from within DataHandler
+     * @param int $defaultLanguagePid uid of a default language page record
+     * @return array<array<string,mixed>> List of subpage records in branch, empty array if there are none
      */
-    protected function doesBranchExist(int $pid, int $permissions, array $pageIdsInBranch = []): ?array
+    protected function getSubPagesOfPage(int $defaultLanguagePid, bool $useDeletedRestriction = true): array
     {
+        $schema = $this->tcaSchemaFactory->get('pages');
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable('pages');
-        $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
+        $queryBuilder->getRestrictions()->removeAll();
+        if ($useDeletedRestriction) {
+            $queryBuilder->getRestrictions()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+        }
         $result = $queryBuilder
-            ->select('uid', 'perms_userid', 'perms_groupid', 'perms_user', 'perms_group', 'perms_everybody')
+            ->select('*')
             ->from('pages')
-            ->where($queryBuilder->expr()->eq('pid', $queryBuilder->createNamedParameter($pid, Connection::PARAM_INT)))
+            ->where(
+                // Sub pages of given pid
+                $queryBuilder->expr()->eq('pid', $queryBuilder->createNamedParameter($defaultLanguagePid, Connection::PARAM_INT)),
+                // Only default language pages
+                $queryBuilder->expr()->eq($schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName(), 0),
+                // We do want to handle "workspace new" and "workspace moved" subpages
+                $queryBuilder->expr()->or(
+                    $queryBuilder->expr()->eq('t3ver_wsid', 0),
+                    // @todo: Verify / add test to see if a workspace-new page is properly discarded if parent page is deleted
+                    // @todo: Add test that moves a page in workspace below some other page, then delete that other page in
+                    //        live and workspaces to see what happens ...
+                    $queryBuilder->expr()->and(
+                        $queryBuilder->expr()->gt('t3ver_wsid', 0),
+                        $queryBuilder->expr()->eq('t3ver_state', VersionState::NEW_PLACEHOLDER->value)
+                    )
+                )
+            )
             ->orderBy('sorting')
             ->executeQuery();
+        $pages = [];
         while ($row = $result->fetchAssociative()) {
-            // IF admin, then it's OK
-            if ($this->admin || $this->BE_USER->doesUserHaveAccess($row, $permissions)) {
-                $pageIdsInBranch[] = (int)$row['uid'];
-                // Follow the subpages recursively
-                $pageIdsInBranch = $this->doesBranchExist((int)$row['uid'], $permissions, $pageIdsInBranch);
-                if ($pageIdsInBranch === null) {
-                    return null;
-                }
-            } else {
-                // No permissions
-                return null;
-            }
+            // Follow subpages recursive, add before self so deeper pages are handled first
+            $pages = array_merge($pages, $this->getSubPagesOfPage((int)$row['uid'], $useDeletedRestriction), [$row]);
         }
-        return $pageIdsInBranch;
+        return $pages;
     }
 
     /**
@@ -7395,7 +7510,7 @@ class DataHandler
         while ($destinationId !== 0 && $loopCheck > 0) {
             $loopCheck--;
             $queryBuilder = $this->connectionPool->getQueryBuilderForTable('pages');
-            $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
+            $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
             $result = $queryBuilder
                 ->select('pid', 'uid', 't3ver_oid', 't3ver_wsid')
                 ->from('pages')
@@ -7485,239 +7600,94 @@ class DataHandler
         return $tableList;
     }
 
-    /*****************************
-     *
-     * Information lookup
-     *
-     *****************************/
     /**
-     * Returns the value of the $field from page $id
-     * NOTICE; the function caches the result for faster delivery next time. You can use this function repeatedly without performance loss since it doesn't look up the same record twice!
+     * Check access permissions to a given page record
      *
-     * @param int $id Page uid
-     * @param string $field Field name for which to return value
-     * @return string|int|null Value of the field. Result is cached in $this->pageCache[$id][$field] and returned from there next time!
-     * @internal should only be used from within DataHandler
+     * @param int $perms Permission restrictions to observe. An integer bitmask of Permission constants
+     * @param array $page Full page record
+     * @internal Strictly internal. May change or vanish any time.
      */
-    protected function pageInfo(int $id, string $field): int|string|null
+    public function hasPagePermission(int $perms, array $page): bool
     {
-        if (!isset($this->pageCache[$id])) {
-            $queryBuilder = $this->connectionPool->getQueryBuilderForTable('pages');
-            $queryBuilder->getRestrictions()->removeAll();
-            $row = $queryBuilder
-                ->select('*')
-                ->from('pages')
-                ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
-                ->executeQuery()
-                ->fetchAssociative();
-            if ($row) {
-                $this->pageCache[$id] = $row;
-            }
-        }
-        return $this->pageCache[$id][$field];
-    }
-
-    /**
-     * Returns the row of a record given by $table and $id
-     * NOTICE: No check for deleted or access!
-     *
-     * @param string $table Table name
-     * @param int $id UID of the record from $table
-     * @return array|null Returns the selected record on success, otherwise NULL.
-     * @internal should only be used from within DataHandler
-     */
-    public function recordInfo($table, $id)
-    {
-        // Skip, if searching for NEW records or there's no TCA table definition
-        if ((int)$id === 0 || !$this->tcaSchemaFactory->has($table)) {
-            return null;
-        }
-        $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-        $queryBuilder->getRestrictions()->removeAll();
-        $result = $queryBuilder
-            ->select('*')
-            ->from($table)
-            ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
-            ->executeQuery()
-            ->fetchAssociative();
-        return $result ?: null;
-    }
-
-    /**
-     * Checks if record exists with and without permission check and returns that row
-     *
-     * @param string $table Record table name
-     * @param int $id Record UID
-     * @param int $perms Permission restrictions to observe: An integer that will be bitwise AND'ed.
-     * @param string $fieldList - fields - default is '*'
-     * @throws \RuntimeException
-     * @return array<string,mixed>|false Row if exists and accessible, false otherwise
-     */
-    protected function recordInfoWithPermissionCheck(string $table, int $id, int $perms, string $fieldList = '*')
-    {
-        if ($this->bypassAccessCheckForRecords) {
-            $columns = GeneralUtility::trimExplode(',', $fieldList, true);
-            $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-            $queryBuilder->getRestrictions()->removeAll();
-            $record = $queryBuilder->select(...$columns)
-                ->from($table)
-                ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
-                ->executeQuery()
-                ->fetchAssociative();
-            return $record ?: false;
-        }
         if (!$perms) {
-            throw new \RuntimeException('Internal ERROR: no permissions to check for non-admin user', 1270853920);
+            throw new \RuntimeException('Invalid $perms bitset: "' . $perms . '"', 1270853920);
         }
-        // For all tables: Check if record exists:
-        $isWebMountRestrictionIgnored = BackendUtility::isWebMountRestrictionIgnored($table);
-        if ($this->tcaSchemaFactory->has($table) && $id > 0 && ($this->admin || $isWebMountRestrictionIgnored || $this->isRecordInWebMount($table, $id))) {
-            $columns = GeneralUtility::trimExplode(',', $fieldList, true);
-            if ($table !== 'pages') {
-                // Find record without checking page
-                // @todo: This should probably check for editlock
-                $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-                $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
-                $output = $queryBuilder
-                    ->select(...$columns)
-                    ->from($table)
-                    ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
-                    ->executeQuery()
-                    ->fetchAssociative();
-                // If record found, check page as well:
-                if (is_array($output)) {
-                    // Looking up the page for record:
-                    $pageRec = $this->doesRecordExist_pageLookUp($output['pid'], $perms);
-                    // Return TRUE if either a page was found OR if the PID is zero AND the user is ADMIN (in which case the record is at root-level):
-                    $isRootLevelRestrictionIgnored = BackendUtility::isRootLevelRestrictionIgnored($table);
-                    if (is_array($pageRec) || !$output['pid'] && ($this->admin || $isRootLevelRestrictionIgnored)) {
-                        return $output;
-                    }
-                }
-                return false;
+        if ($this->bypassAccessCheckForRecords || $this->admin) {
+            return true;
+        }
+
+        $pagesSchema = $this->tcaSchemaFactory->get('pages');
+        if (!$pagesSchema->hasCapability(TcaSchemaCapability::RestrictionWebMount) && !$this->BE_USER->isInWebMount($page)) {
+            return false;
+        }
+        $beUserUid = $this->BE_USER->getUserId();
+        if (!$beUserUid) {
+            return false;
+        }
+        $permission = new Permission($perms);
+
+        $editLockFieldName = null;
+        $editLockCheck = false;
+        if ($pagesSchema->hasCapability(TcaSchemaCapability::EditLock)) {
+            $editLockFieldName = $pagesSchema->getCapability(TcaSchemaCapability::EditLock)->getFieldName();
+            if ($permission->editPagePermissionIsGranted() || $permission->deletePagePermissionIsGranted() || $permission->editContentPermissionIsGranted()) {
+                $editLockCheck = true;
             }
-            return $this->doesRecordExist_pageLookUp($id, $perms, $columns);
+        }
+        $groupUids = [];
+        $groupCheck = false;
+        if (!empty($this->BE_USER->userGroupsUID)) {
+            $groupUids = $this->BE_USER->userGroupsUID;
+            $groupCheck = true;
+        }
+        if ((!$editLockCheck || (int)$page[$editLockFieldName] === 0)
+            && (
+                ((int)$page['perms_everybody'] & $perms) === $perms
+                || ((int)$page['perms_userid'] === $beUserUid && ((int)$page['perms_user'] & $perms) === $perms)
+                || ($groupCheck && in_array((int)$page['perms_groupid'], $groupUids, true) && ((int)$page['perms_group'] & $perms) === $perms)
+            )
+        ) {
+            // A PHP implementation of BackendUserAuthentication->getPagePermsClause() plus the "editlock" check.
+            return true;
         }
         return false;
     }
 
     /**
-     * Returns an array with record properties, like header and pid
-     * No check for deleted or access is done!
-     * For versionized records, pid is resolved to its live versions pid.
-     * Used for logging
-     *
-     * @param string $table Table name
-     * @param int $id Uid of record
-     * @param bool $noWSOL If set, no workspace overlay is performed
-     * @return array Properties of record
-     * @internal should only be used from within DataHandler
-     */
-    public function getRecordProperties($table, $id, $noWSOL = false)
-    {
-        $row = $table === 'pages' && !$id ? ['title' => '[root-level]', 'uid' => 0, 'pid' => 0] : $this->recordInfo($table, $id);
-        if (!$noWSOL) {
-            BackendUtility::workspaceOL($table, $row);
-        }
-        return $this->getRecordPropertiesFromRow($table, $row);
-    }
-
-    /**
-     * Returns an array with record properties, like header and pid, based on the row
-     *
-     * @param string $table Table name
-     * @param array $row Input row
-     * @return array|null Output array
-     * @internal should only be used from within DataHandler
-     */
-    public function getRecordPropertiesFromRow($table, $row)
-    {
-        if ($this->tcaSchemaFactory->has($table)) {
-            $liveUid = ($row['t3ver_oid'] ?? null) ?: ($row['uid'] ?? null);
-            $fullRow = $this->recordInfo($table, $liveUid);
-            return [
-                'header' => BackendUtility::getRecordTitle($table, $fullRow ?: $row),
-                'pid' => $row['pid'] ?? null,
-                'event_pid' => $this->eventPid($table, (int)$liveUid, $row['pid'] ?? null),
-                't3ver_state' => $this->tcaSchemaFactory->get($table)->isWorkspaceAware() ? ($row['t3ver_state'] ?? '') : '',
-            ];
-        }
-        return null;
-    }
-
-    /**
-     * @param string $table
-     * @param int $uid
-     * @param int $pid
-     * @return int
-     * @internal should only be used from within DataHandler
-     */
-    public function eventPid($table, $uid, $pid)
-    {
-        return $table === 'pages' ? $uid : $pid;
-    }
-
-    /*********************************************
-     *
-     * Storing data to Database Layer
-     *
-     ********************************************/
-    /**
      * Update database record
      * Does not check permissions but expects them to be verified on beforehand
      *
      * @param string $table Record table name
-     * @param int $id Record uid
+     * @param int $uid Record uid
      * @param array $fieldArray Array of field=>value pairs to insert. FIELDS MUST MATCH the database FIELDS. No check is done.
-     * @internal should only be used from within DataHandler
      */
-    public function updateDB($table, $id, $fieldArray): void
+    public function updateDB($table, $uid, $fieldArray, int $recordPid = 0): void
     {
-        if (is_array($fieldArray) && $this->tcaSchemaFactory->has($table) && (int)$id) {
-            // Do NOT update the UID field, ever!
-            unset($fieldArray['uid']);
-            if (!empty($fieldArray)) {
-                $fieldArray = $this->insertUpdateDB_preprocessBasedOnFieldType($table, $fieldArray);
-                $connection = $this->connectionPool->getConnectionForTable($table);
-                $updateErrorMessage = '';
-                try {
-                    // Execute the UPDATE query:
-                    $connection->update($table, $fieldArray, ['uid' => (int)$id]);
-                } catch (DBALException $e) {
-                    $updateErrorMessage = $e->getPrevious()->getMessage();
-                }
-                // If succeeds, do...:
-                if ($updateErrorMessage === '') {
-                    // Update reference index:
-                    $this->updateRefIndex($table, $id);
-                    // Set History data
-                    $historyEntryId = 0;
-                    if (isset($this->historyRecords[$table . ':' . $id])) {
-                        $historyEntryId = $this->getRecordHistoryStore()->modifyRecord($table, $id, $this->historyRecords[$table . ':' . $id], $this->correlationId);
-                    }
-                    if ($this->enableLogging) {
-                        $newRow = $fieldArray;
-                        $newRow['uid'] = $id;
-                        // Set log entry:
-                        $propArr = $this->getRecordPropertiesFromRow($table, $newRow);
-                        $isOfflineVersion = (bool)($newRow['t3ver_oid'] ?? 0);
-                        if ($isOfflineVersion) {
-                            $this->log($table, $id, SystemLogDatabaseAction::UPDATE, $propArr['pid'], SystemLogErrorClassification::MESSAGE, 'Record "{title}" ({table}:{uid}) was updated (Offline version)', 10, ['title' => $propArr['header'], 'table' => $table, 'uid' => $id, 'history' => $historyEntryId], $propArr['event_pid']);
-                        } else {
-                            $this->log($table, $id, SystemLogDatabaseAction::UPDATE, $propArr['pid'], SystemLogErrorClassification::MESSAGE, 'Record "{title}" ({table}:{uid}) was updated', 10, ['title' => $propArr['header'], 'table' => $table, 'uid' => $id, 'history' => $historyEntryId], $propArr['event_pid']);
-                        }
-                    }
-                    // Clear cache for relevant pages:
-                    $this->registerRecordIdForPageCacheClearing($table, $id);
-                    // Unset the pageCache for the id if table was page.
-                    if ($table === 'pages') {
-                        unset($this->pageCache[$id]);
-                    }
-                } else {
-                    $this->log($table, $id, SystemLogDatabaseAction::UPDATE, 0, SystemLogErrorClassification::SYSTEM_ERROR, 'SQL error: "{reason}" ({table}:{uid})', 12, ['reason' => $updateErrorMessage, 'table' => $table, 'uid' => $id]);
-                }
-            }
+        if (!is_array($fieldArray) || !$this->tcaSchemaFactory->has($table) || !(int)$uid) {
+            return;
         }
+        // Never update the uid field
+        unset($fieldArray['uid']);
+        if (empty($fieldArray)) {
+            return;
+        }
+        $fieldArray = $this->insertUpdateDB_preprocessBasedOnFieldType($table, $fieldArray);
+        $connection = $this->connectionPool->getConnectionForTable($table);
+        try {
+            $connection->update($table, $fieldArray, ['uid' => (int)$uid]);
+        } catch (DBALException $e) {
+            $this->log($table, $uid, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::SYSTEM_ERROR, 'SQL error: "{reason}" ({table}:{uid})', null, ['reason' => $e->getMessage(), 'table' => $table, 'uid' => $uid]);
+            return;
+        }
+        $this->updateRefIndex($table, $uid);
+        // Set History data
+        $historyEntryId = 0;
+        if (isset($this->historyRecords[$table . ':' . $uid])) {
+            $historyEntryId = $this->getRecordHistoryStore()->modifyRecord($table, $uid, $this->historyRecords[$table . ':' . $uid], $this->correlationId);
+        }
+        $this->log($table, $uid, SystemLogDatabaseAction::UPDATE, null, SystemLogErrorClassification::MESSAGE, 'Record {table}:{uid} was updated', null, ['table' => $table, 'uid' => $uid, 'history' => $historyEntryId], $recordPid);
+        // Clear cache for relevant pages:
+        $this->registerRecordIdForPageCacheClearing($table, $uid);
     }
 
     /**
@@ -7727,82 +7697,61 @@ class DataHandler
      * @param string $table Record table name
      * @param string $id "NEW...." uid string
      * @param array $fieldArray Array of field=>value pairs to insert. FIELDS MUST MATCH the database FIELDS. No check is done. "pid" must point to the destination of the record!
-     * @param bool $newVersion Set to TRUE if new version is created.
-     * @param int $suggestedUid Suggested UID value for the inserted record. See the array $this->suggestedInsertUids; Admin-only feature
-     * @param bool $dontSetNewIdIndex If TRUE, the ->substNEWwithIDs array is not updated. Only useful in very rare circumstances!
+     * @param null $_ unused
      * @return int|null Returns ID on success.
      * @internal should only be used from within DataHandler
      */
-    public function insertDB($table, $id, $fieldArray, $newVersion = false, $suggestedUid = 0, $dontSetNewIdIndex = false)
+    public function insertDB($table, $id, $fieldArray, $_ = null, $suggestedUid = 0): ?int
     {
-        if (is_array($fieldArray) && $this->tcaSchemaFactory->has($table) && isset($fieldArray['pid'])) {
-            // Do NOT insert the UID field, ever!
-            unset($fieldArray['uid']);
-            // Check for "suggestedUid".
-            // This feature is used by the import functionality to force a new record to have a certain UID value.
-            // This is only recommended for use when the destination server is a passive mirror of another server.
-            // As a security measure this feature is available only for Admin Users (for now)
-            // The value of $this->suggestedInsertUids["table":"uid"] is either string 'DELETE' (ext:impexp) to trigger
-            // a blind delete of any possibly existing row before insert with forced uid, or boolean true (testing-framework)
-            // to only force the uid insert and skipping deletion of an existing row.
-            $suggestedUid = (int)$suggestedUid;
-            if ($this->BE_USER->isAdmin() && $suggestedUid && ($this->suggestedInsertUids[$table . ':' . $suggestedUid] ?? false)) {
-                // When the value of ->suggestedInsertUids[...] is "DELETE" it will try to remove the previous record
-                if ($this->suggestedInsertUids[$table . ':' . $suggestedUid] === 'DELETE') {
-                    $this->hardDeleteSingleRecord($table, (int)$suggestedUid);
-                }
-                $fieldArray['uid'] = $suggestedUid;
-            }
-            $fieldArray = $this->insertUpdateDB_preprocessBasedOnFieldType($table, $fieldArray);
-            $connection = $this->connectionPool->getConnectionForTable($table);
-            $insertErrorMessage = '';
-            try {
-                // Execute the INSERT query:
-                $connection->insert($table, $fieldArray);
-            } catch (DBALException $e) {
-                $insertErrorMessage = $e->getPrevious()->getMessage();
-            }
-            // If succees, do...:
-            if ($insertErrorMessage === '') {
-                // Set mapping for NEW... -> real uid:
-                // the NEW_id now holds the 'NEW....' -id
-                $NEW_id = $id;
-                $id = $this->postProcessDatabaseInsert($connection, $table, $suggestedUid);
-
-                if (!$dontSetNewIdIndex) {
-                    $this->substNEWwithIDs[$NEW_id] = $id;
-                    $this->substNEWwithIDs_table[$NEW_id] = $table;
-                }
-                $newRow = [];
-                if ($this->enableLogging) {
-                    $newRow = $fieldArray;
-                    $newRow['uid'] = $id;
-                }
-                // Update reference index:
-                $this->updateRefIndex($table, $id);
-
-                // Store in history
-                $this->getRecordHistoryStore()->addRecord($table, $id, $newRow, $this->correlationId);
-
-                if ($newVersion) {
-                    if ($this->enableLogging) {
-                        $propArr = $this->getRecordPropertiesFromRow($table, $newRow);
-                        $this->log($table, $id, SystemLogDatabaseAction::INSERT, 0, SystemLogErrorClassification::MESSAGE, 'New version created "{table}:{uid}". UID of new version is "{offlineUid}"', 10, ['table' => $table, 'uid' => $fieldArray['t3ver_oid'], 'offlineUid' => $id], $propArr['event_pid'], $NEW_id);
-                    }
-                } else {
-                    if ($this->enableLogging) {
-                        $propArr = $this->getRecordPropertiesFromRow($table, $newRow);
-                        $page_propArr = $this->getRecordProperties('pages', $propArr['pid']);
-                        $this->log($table, $id, SystemLogDatabaseAction::INSERT, 0, SystemLogErrorClassification::MESSAGE, 'Record "{title}" ({table}:{uid}) was inserted on page "{pageTitle}" ({pid})', 10, ['title' => $propArr['header'], 'table' => $table, 'uid' => $id, 'pageTitle' => $page_propArr['header'], 'pid' => $newRow['pid']], $newRow['pid'], $NEW_id);
-                    }
-                    // Clear cache for relevant pages:
-                    $this->registerRecordIdForPageCacheClearing($table, $id);
-                }
-                return $id;
-            }
-            $this->log($table, 0, SystemLogDatabaseAction::INSERT, 0, SystemLogErrorClassification::SYSTEM_ERROR, 'SQL error: "{reason}" ({table}:{uid})', 12, ['reason' => $insertErrorMessage, 'table' => $table, 'uid' => $id]);
+        if (!is_array($fieldArray) || !$this->tcaSchemaFactory->has($table) || !isset($fieldArray['pid'])) {
+            return null;
         }
-        return null;
+        // Do NOT insert the UID field, ever!
+        unset($fieldArray['uid']);
+        // Check for "suggestedUid".
+        // This feature is used by the import functionality to force a new record to have a certain UID value.
+        // This is only recommended for use when the destination server is a passive mirror of another server.
+        // As a security measure this feature is available only for Admin Users (for now)
+        // The value of $this->suggestedInsertUids["table":"uid"] is either string 'DELETE' (ext:impexp) to trigger
+        // a blind delete of any possibly existing row before insert with forced uid, or boolean true (testing-framework)
+        // to only force the uid insert and skipping deletion of an existing row.
+        $suggestedUid = (int)$suggestedUid;
+        if ($this->BE_USER->isAdmin() && $suggestedUid && ($this->suggestedInsertUids[$table . ':' . $suggestedUid] ?? false)) {
+            // When the value of ->suggestedInsertUids[...] is "DELETE" it will try to remove the previous record
+            if ($this->suggestedInsertUids[$table . ':' . $suggestedUid] === 'DELETE') {
+                $this->hardDeleteSingleRecord($table, (int)$suggestedUid);
+            }
+            $fieldArray['uid'] = $suggestedUid;
+        }
+        $fieldArray = $this->insertUpdateDB_preprocessBasedOnFieldType($table, $fieldArray);
+        $connection = $this->connectionPool->getConnectionForTable($table);
+        try {
+            // Execute the INSERT query:
+            $connection->insert($table, $fieldArray);
+        } catch (DBALException $e) {
+            $this->log($table, 0, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::SYSTEM_ERROR, 'SQL error: "{reason}" ({table}:{uid})', null, ['reason' => $e->getMessage(), 'table' => $table, 'uid' => $id]);
+            return null;
+        }
+        // Set mapping for NEW... -> real uid:
+        // the NEW_id now holds the 'NEW....' -id
+        $NEW_id = $id;
+        $id = $this->postProcessDatabaseInsert($connection, $table, $suggestedUid);
+        $this->substNEWwithIDs[$NEW_id] = $id;
+        $this->substNEWwithIDs_table[$NEW_id] = $table;
+        $newRow = $fieldArray;
+        $newRow['uid'] = $id;
+        // Update reference index:
+        $this->updateRefIndex($table, $id);
+        // Store in history
+        $this->getRecordHistoryStore()->addRecord($table, $id, $newRow, $this->correlationId);
+        if ($this->tcaSchemaFactory->get($table)->isWorkspaceAware() && (int)($newRow['t3ver_wsid'] ?? 0) > 0) {
+            $this->log($table, $id, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::MESSAGE, 'New version created "{table}:{uid}". UID of new version is "{offlineUid}"', null, ['table' => $table, 'uid' => $newRow['uid'], 'offlineUid' => $id], $table === 'pages' ? $newRow['uid'] : $newRow['pid']);
+        } else {
+            $this->log($table, $id, SystemLogDatabaseAction::INSERT, null, SystemLogErrorClassification::MESSAGE, 'Record {table}:{uid} was inserted on page {pid}', null, ['table' => $table, 'uid' => $id, 'pid' => $newRow['pid']], $newRow['pid']);
+            // Clear cache of relevant pages
+            $this->registerRecordIdForPageCacheClearing($table, $id);
+        }
+        return $id;
     }
 
     /**
@@ -7882,11 +7831,6 @@ class DataHandler
         $this->referenceIndexUpdater->registerUpdateForReferencesToItem($table, $uid, $workspace, $targetWorkspace);
     }
 
-    /*********************************************
-     *
-     * Misc functions
-     *
-     ********************************************/
     /**
      * Returning sorting number for tables with a "sortby" column
      * Using when new records are created and existing records are moved around.
@@ -7912,24 +7856,21 @@ class DataHandler
      * The algorithm can be tuned by adjusting the interval value.
      * Higher value means less collisions, but also less inserts are possible to stay within INT_MAX.
      *
-     * @param string $table Table name
      * @param int $uid Uid of record to find sorting number for. May be zero in case of new.
      * @param int $pid Positioning PID, either >=0 (pointing to page in which case we find sorting number for first record in page) or <0 (pointing to record in which case to find next sorting number after this record)
-     * @return int|array|bool|null Returns integer if PID is >=0, otherwise an array with PID and sorting number. Possibly FALSE in case of error.
-     * @internal should only be used from within DataHandler
+     * @return int|array|false Returns integer if PID is >=0, otherwise an array with PID and sorting number. Possibly FALSE in case of error.
      */
-    public function getSortNumber($table, $uid, $pid)
+    protected function getSortNumber(string $table, $uid, $pid): int|array|false
     {
         $schema = $this->tcaSchemaFactory->get($table);
         if (!$schema->hasCapability(TcaSchemaCapability::SortByField)) {
-            return null;
+            return false;
         }
         $sortColumn = $schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName();
 
         $considerWorkspaces = $schema->isWorkspaceAware();
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-        $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
-
+        $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
         $queryBuilder
             ->select($sortColumn, 'pid', 'uid')
             ->from($table);
@@ -7988,13 +7929,9 @@ class DataHandler
 
         // There is a previous record
         if (!empty($row)) {
-            $row += [
-                't3ver_state' => 0,
-                'uid' => 0,
-            ];
             // Look if the record UID happens to be a versioned record. If so, find its live version.
             // If this is already a moved record in workspace, this is not needed
-            if (VersionState::tryFrom($row['t3ver_state'] ?? 0) !== VersionState::MOVE_POINTER && $lookForLiveVersion = BackendUtility::getLiveVersionOfRecord($table, $row['uid'], $sortColumn . ',pid,uid')) {
+            if (VersionState::tryFrom((int)($row['t3ver_state'] ?? 0)) !== VersionState::MOVE_POINTER && $lookForLiveVersion = BackendUtility::getLiveVersionOfRecord($table, $row['uid'], $sortColumn . ',pid,uid')) {
                 $row = $lookForLiveVersion;
             } elseif ($considerWorkspaces && $this->BE_USER->workspace > 0) {
                 // In case the previous record is moved in the workspace, we need to fetch the information from this specific record
@@ -8008,8 +7945,7 @@ class DataHandler
                 $sortNumber = $row[$sortColumn];
             } else {
                 $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-                $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
-
+                $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
                 $queryBuilder
                         ->select($sortColumn, 'pid', 'uid')
                         ->from($table)
@@ -8055,12 +7991,8 @@ class DataHandler
             }
             return ['pid' => $row['pid'], 'sortNumber' => $sortNumber];
         }
-        if ($this->enableLogging) {
-            $propArr = $this->getRecordProperties($table, $uid);
-            // OK, don't insert $propArr['event_pid'] here...
-            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, 0, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record "{title}" ({table}:{uid}) to after a non-existing record ({target})', 1, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'target' => abs($pid)], $propArr['pid']);
-        }
-        // There MUST be a previous record or else this cannot work
+        // There must be a previous record or else this cannot work
+        $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record {table}:{uid} after a non-existing record ({target})', null, ['table' => $table, 'uid' => $uid, 'target' => abs($pid)], $pid);
         return false;
     }
 
@@ -8072,7 +8004,6 @@ class DataHandler
      * @param string $table Table name
      * @param int $pid Page Uid in which to resort records
      * @param int|null $sortingValue All sorting numbers larger than this number will be shifted
-     * @see getSortNumber()
      */
     protected function increaseSortingOfFollowingRecords(string $table, int $pid, ?int $sortingValue = null): void
     {
@@ -8166,7 +8097,7 @@ class DataHandler
 
         // Try to find a "before" record in source language
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-        $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
+        $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
         $queryBuilder
             ->select(...$select)
             ->from($table)
@@ -8208,8 +8139,9 @@ class DataHandler
     }
 
     /**
-     * Returns a fieldArray with default values. Values will be picked up from the TCA array looking at the config key "default" for each column. If values are set in ->defaultValues they will overrule though.
-     * Used for new records and during copy operations for defaults
+     * Returns a fieldArray with default values. Values will be picked up from the TCA array
+     * looking at the config key "default" for each column. If values are set in ->defaultValues
+     * they will overrule though. Used for new records and during copy operations for defaults.
      *
      * @param string $table Table name for which to set default values.
      * @return array Array with default values.
@@ -8222,7 +8154,7 @@ class DataHandler
             foreach ($this->tcaSchemaFactory->get($table)->getFields() as $field) {
                 if (isset($this->defaultValues[$table][$field->getName()])) {
                     $fieldArray[$field->getName()] = $this->defaultValues[$table][$field->getName()];
-                } elseif ($field->getDefaultValue() !== null) {
+                } elseif ($field->hasDefaultValue() && ($field->getDefaultValue() !== null || $field->isNullable())) {
                     $fieldArray[$field->getName()] = $field->getDefaultValue();
                 }
             }
@@ -8233,8 +8165,6 @@ class DataHandler
     /**
      * If a "languageField" is specified for $table this function will add a
      * possible value to the incoming array if none is found in there already.
-     *
-     * @internal should only be used from within DataHandler
      */
     protected function addDefaultPermittedLanguageIfNotSet(string $table, array $incomingFieldArray, int $pageId): array
     {
@@ -8304,7 +8234,7 @@ class DataHandler
      * @return array Returns $fieldArray. If the returned array is empty, then the record should not be updated!
      * @internal should only be used from within DataHandler
      */
-    public function compareFieldArrayWithCurrentAndUnset($table, $id, $fieldArray)
+    public function compareFieldArrayWithCurrentAndUnset($table, $id, $fieldArray): array
     {
         $connection = $this->connectionPool->getConnectionForTable($table);
         $queryBuilder = $connection->createQueryBuilder();
@@ -8314,51 +8244,49 @@ class DataHandler
             ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
             ->executeQuery()
             ->fetchAssociative();
+        if (!is_array($currentRecord)) {
+            return [];
+        }
         // If the current record exists (which it should...), begin comparison:
-        if (is_array($currentRecord)) {
-            $currentRecord = BackendUtility::convertDatabaseRowValuesToPhp($table, $currentRecord);
-            $tableDetails = $connection->getSchemaInformation()->introspectTable($table);
-            $columnRecordTypes = [];
-            foreach ($currentRecord as $columnName => $_) {
-                $columnRecordTypes[$columnName] = '';
-                $type = $tableDetails->getColumn($columnName)->getType();
-                if ($type instanceof IntegerType) {
-                    $columnRecordTypes[$columnName] = 'int';
-                } elseif ($type instanceof JsonType) {
-                    $columnRecordTypes[$columnName] = 'json';
+        $currentRecord = BackendUtility::convertDatabaseRowValuesToPhp($table, $currentRecord);
+        $tableInfo = $connection->getSchemaInformation()->getTableInfo($table);
+        $columnRecordTypes = [];
+        foreach ($currentRecord as $columnName => $_) {
+            $columnRecordTypes[$columnName] = '';
+            $type = $tableInfo->getColumnInfo($columnName)?->getType();
+            if ($type instanceof IntegerType) {
+                $columnRecordTypes[$columnName] = 'int';
+            } elseif ($type instanceof JsonType) {
+                $columnRecordTypes[$columnName] = 'json';
+            }
+        }
+        // Unset the fields which are similar:
+        foreach ($fieldArray as $col => $val) {
+            $fieldConfiguration = [];
+            $isNullField = false;
+
+            if ($this->tcaSchemaFactory->get($table)->hasField($col)) {
+                $fieldType = $this->tcaSchemaFactory->get($table)->getField($col);
+                $fieldConfiguration = $fieldType->getConfiguration();
+                $isNullField = $fieldType->isNullable();
+            }
+
+            // Unset fields if stored and submitted values are equal - except the current field holds MM relations.
+            // In general this avoids to store superfluous data which also will be visualized in the editing history.
+            if (empty($fieldConfiguration['MM']) && $this->isSubmittedValueEqualToStoredValue($val, $currentRecord[$col], $columnRecordTypes[$col], $isNullField)) {
+                unset($fieldArray[$col]);
+            } else {
+                if (!isset($this->mmHistoryRecords[$table . ':' . $id]['oldRecord'][$col])) {
+                    $this->historyRecords[$table . ':' . $id]['oldRecord'][$col] = $currentRecord[$col];
+                } elseif ($this->mmHistoryRecords[$table . ':' . $id]['oldRecord'][$col] != $this->mmHistoryRecords[$table . ':' . $id]['newRecord'][$col]) {
+                    $this->historyRecords[$table . ':' . $id]['oldRecord'][$col] = $this->mmHistoryRecords[$table . ':' . $id]['oldRecord'][$col];
+                }
+                if (!isset($this->mmHistoryRecords[$table . ':' . $id]['newRecord'][$col])) {
+                    $this->historyRecords[$table . ':' . $id]['newRecord'][$col] = $fieldArray[$col];
+                } elseif ($this->mmHistoryRecords[$table . ':' . $id]['newRecord'][$col] != $this->mmHistoryRecords[$table . ':' . $id]['oldRecord'][$col]) {
+                    $this->historyRecords[$table . ':' . $id]['newRecord'][$col] = $this->mmHistoryRecords[$table . ':' . $id]['newRecord'][$col];
                 }
             }
-            // Unset the fields which are similar:
-            foreach ($fieldArray as $col => $val) {
-                $fieldConfiguration = [];
-                $isNullField = false;
-
-                if ($this->tcaSchemaFactory->get($table)->hasField($col)) {
-                    $fieldType = $this->tcaSchemaFactory->get($table)->getField($col);
-                    $fieldConfiguration = $fieldType->getConfiguration();
-                    $isNullField = $fieldType->isNullable();
-                }
-
-                // Unset fields if stored and submitted values are equal - except the current field holds MM relations.
-                // In general this avoids to store superfluous data which also will be visualized in the editing history.
-                if (empty($fieldConfiguration['MM']) && $this->isSubmittedValueEqualToStoredValue($val, $currentRecord[$col], $columnRecordTypes[$col], $isNullField)) {
-                    unset($fieldArray[$col]);
-                } else {
-                    if (!isset($this->mmHistoryRecords[$table . ':' . $id]['oldRecord'][$col])) {
-                        $this->historyRecords[$table . ':' . $id]['oldRecord'][$col] = $currentRecord[$col];
-                    } elseif ($this->mmHistoryRecords[$table . ':' . $id]['oldRecord'][$col] != $this->mmHistoryRecords[$table . ':' . $id]['newRecord'][$col]) {
-                        $this->historyRecords[$table . ':' . $id]['oldRecord'][$col] = $this->mmHistoryRecords[$table . ':' . $id]['oldRecord'][$col];
-                    }
-                    if (!isset($this->mmHistoryRecords[$table . ':' . $id]['newRecord'][$col])) {
-                        $this->historyRecords[$table . ':' . $id]['newRecord'][$col] = $fieldArray[$col];
-                    } elseif ($this->mmHistoryRecords[$table . ':' . $id]['newRecord'][$col] != $this->mmHistoryRecords[$table . ':' . $id]['oldRecord'][$col]) {
-                        $this->historyRecords[$table . ':' . $id]['newRecord'][$col] = $this->mmHistoryRecords[$table . ':' . $id]['newRecord'][$col];
-                    }
-                }
-            }
-        } else {
-            // If the current record does not exist this is an error anyways and we just return an empty array here.
-            $fieldArray = [];
         }
         return $fieldArray;
     }
@@ -8407,43 +8335,6 @@ class DataHandler
     }
 
     /**
-     * Disables the delete clause for fetching records.
-     * In general only undeleted records will be used. If the delete
-     * clause is disabled, also deleted records are taken into account.
-     */
-    public function disableDeleteClause(): void
-    {
-        $this->disableDeleteClause = true;
-    }
-
-    /**
-     * Returns delete-clause for the $table
-     *
-     * @param string $table Table name
-     * @return string Delete clause
-     * @internal should only be used from within DataHandler
-     */
-    public function deleteClause($table): string
-    {
-        // Returns the proper delete-clause if any for a table from TCA
-        $schema = $this->tcaSchemaFactory->get($table);
-        if (!$this->disableDeleteClause && $schema->hasCapability(TcaSchemaCapability::SoftDelete)) {
-            return ' AND ' . $table . '.' . $schema->getCapability(TcaSchemaCapability::SoftDelete)->getFieldName() . '=0';
-        }
-        return '';
-    }
-
-    /**
-     * Add delete restriction if not disabled
-     */
-    protected function addDeleteRestriction(QueryRestrictionContainerInterface $restrictions): void
-    {
-        if (!$this->disableDeleteClause) {
-            $restrictions->add(GeneralUtility::makeInstance(DeletedRestriction::class));
-        }
-    }
-
-    /**
      * Gets UID of parent record. If record is deleted it will be looked up in
      * an array built before the record was deleted
      *
@@ -8474,27 +8365,6 @@ class DataHandler
         $dA = is_array($TSconfig['default.'] ?? false) ? $TSconfig['default.'] : [];
         ArrayUtility::mergeRecursiveWithOverrule($dA, $tA);
         return $dA;
-    }
-
-    /**
-     * Returns the pid of a record from $table with $uid
-     *
-     * @param string $table Table name
-     * @param int $uid Record uid
-     * @return int|false PID value (unless the record did not exist in which case FALSE is returned)
-     * @internal should only be used from within DataHandler
-     */
-    public function getPID($table, $uid)
-    {
-        $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-        $queryBuilder->getRestrictions()->removeAll();
-        $queryBuilder->select('pid')
-            ->from($table)
-            ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT)));
-        if ($row = $queryBuilder->executeQuery()->fetchAssociative()) {
-            return $row['pid'];
-        }
-        return false;
     }
 
     /**
@@ -8532,8 +8402,7 @@ class DataHandler
     {
         if ($counter) {
             $queryBuilder = $this->connectionPool->getQueryBuilderForTable('pages');
-            $restrictions = $queryBuilder->getRestrictions()->removeAll();
-            $this->addDeleteRestriction($restrictions);
+            $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
             $queryBuilder
                 ->select('uid')
                 ->from('pages')
@@ -8545,7 +8414,7 @@ class DataHandler
             if (!$this->admin) {
                 $queryBuilder->andWhere($this->BE_USER->getPagePermsClause(Permission::PAGE_SHOW));
             }
-            if ((int)$this->BE_USER->workspace === 0) {
+            if ($this->BE_USER->workspace === 0) {
                 $queryBuilder->andWhere(
                     $queryBuilder->expr()->eq('t3ver_wsid', $queryBuilder->createNamedParameter(0, Connection::PARAM_INT))
                 );
@@ -8563,7 +8432,7 @@ class DataHandler
             }
 
             // Resolve placeholders of workspace versions
-            if (!empty($pages) && (int)$this->BE_USER->workspace !== 0) {
+            if (!empty($pages) && $this->BE_USER->workspace !== 0) {
                 $pages = array_reverse(
                     $this->resolveVersionedRecords(
                         'pages',
@@ -8591,63 +8460,75 @@ class DataHandler
     /**
      * Checks if any uniqueInPid eval input fields are in the record and if so, they are re-written to be correct.
      *
-     * @param string $table Table name
-     * @param int $uid Record UID
      * @internal should only be used from within DataHandler
      */
-    public function fixUniqueInPid($table, $uid): void
+    public function fixUniqueInPid(string $table, $uidOrRow): void
     {
-        if (!$this->tcaSchemaFactory->has($table)) {
-            return;
-        }
-        $curData = $this->recordInfo($table, $uid);
         $newData = [];
+        $row = null;
         foreach ($this->tcaSchemaFactory->get($table)->getFields() as $field) {
-            if ($field->isType(TableColumnType::INPUT, TableColumnType::EMAIL) && (string)$curData[$field->getName()] !== '') {
+            if (!$field->isType(TableColumnType::INPUT, TableColumnType::EMAIL)) {
+                continue;
+            }
+            if ($row === null) {
+                if (is_array($uidOrRow)) {
+                    $row = $uidOrRow;
+                } else {
+                    $row = BackendUtility::getRecord($table, $uidOrRow, '*', '', false);
+                }
+            }
+            if ((string)$row[$field->getName()] !== '') {
                 $evalCodesArray = GeneralUtility::trimExplode(',', $field->getConfiguration()['eval'] ?? '', true);
                 if (in_array('uniqueInPid', $evalCodesArray, true)) {
-                    $newV = $this->getUnique($table, $field->getName(), $curData[$field->getName()], $uid, $curData['pid']);
-                    if ((string)$newV !== (string)$curData[$field->getName()]) {
-                        $newData[$field->getName()] = $newV;
+                    $newValue = $this->getUnique($table, $field->getName(), $row[$field->getName()], (int)$row['uid'], (int)$row['pid']);
+                    if ((string)$newValue !== (string)$row[$field->getName()]) {
+                        $newData[$field->getName()] = $newValue;
                     }
                 }
             }
         }
-        // IF there are changed fields, then update the database
         if (!empty($newData)) {
-            $this->updateDB($table, $uid, $newData);
+            $this->updateDB($table, (int)$row['uid'], $newData, (int)$row['pid']);
         }
     }
 
     /**
      * Checks if any uniqueInSite eval fields are in the record and if so, they are re-written to be correct.
      *
-     * @param string $table Table name
-     * @param int $uid Record UID
      * @return bool whether the record had to be fixed or not
      */
-    protected function fixUniqueInSite(string $table, int $uid): bool
+    protected function fixUniqueInSite(string $table, int|array $uidOrRow): bool
     {
-        $curData = $this->recordInfo($table, $uid);
-        $workspaceId = $this->BE_USER->workspace;
         $newData = [];
+        $row = null;
         foreach ($this->tcaSchemaFactory->get($table)->getFields() as $field) {
-            if ($field->isType(TableColumnType::SLUG) && (string)$curData[$field->getName()] !== '') {
-                $conf = $field->getConfiguration();
-                $evalCodesArray = GeneralUtility::trimExplode(',', $conf['eval'] ?? '', true);
-                if (in_array('uniqueInSite', $evalCodesArray, true)) {
-                    $helper = GeneralUtility::makeInstance(SlugHelper::class, $table, $field->getName(), $conf, $workspaceId);
-                    $state = RecordStateFactory::forName($table)->fromArray($curData);
-                    $newValue = $helper->buildSlugForUniqueInSite($curData[$field->getName()], $state);
-                    if ((string)$newValue !== (string)$curData[$field->getName()]) {
-                        $newData[$field->getName()] = $newValue;
-                    }
+            if (!$field->isType(TableColumnType::SLUG)) {
+                continue;
+            }
+            $conf = $field->getConfiguration();
+            $evalCodesArray = GeneralUtility::trimExplode(',', $conf['eval'] ?? '', true);
+            if (!in_array('uniqueInSite', $evalCodesArray, true)) {
+                continue;
+            }
+            if ($row === null) {
+                if (is_array($uidOrRow)) {
+                    $row = $uidOrRow;
+                } else {
+                    $row = BackendUtility::getRecord($table, $uidOrRow, '*', '', false);
                 }
             }
+            if ((string)$row[$field->getName()] === '') {
+                continue;
+            }
+            $helper = GeneralUtility::makeInstance(SlugHelper::class, $table, $field->getName(), $conf, $this->BE_USER->workspace);
+            $state = RecordStateFactory::forName($table)->fromArray($row);
+            $newValue = $helper->buildSlugForUniqueInSite($row[$field->getName()], $state);
+            if ((string)$newValue !== (string)$row[$field->getName()]) {
+                $newData[$field->getName()] = $newValue;
+            }
         }
-        // IF there are changed fields, then update the database
         if (!empty($newData)) {
-            $this->updateDB($table, $uid, $newData);
+            $this->updateDB($table, $row['uid'], $newData, (int)$row['pid']);
             return true;
         }
         return false;
@@ -8676,7 +8557,6 @@ class DataHandler
      * @param int $prevUid UID of previous record
      *
      * @return array Output array (For when the copying operation needs to get the information instead of updating the info)
-     * @internal should only be used from within DataHandler
      */
     protected function fixCopyAfterDuplFields(string $table, int $prevUid): array
     {
@@ -8684,7 +8564,7 @@ class DataHandler
         if (!isset($schema->getRawConfiguration()['copyAfterDuplFields'])) {
             return [];
         }
-        if (($prevData = $this->recordInfo($table, $prevUid)) === null) {
+        if (($prevData = BackendUtility::getRecord($table, $prevUid, '*', '', false)) === null) {
             return [];
         }
 
@@ -8727,6 +8607,12 @@ class DataHandler
 
         if (!$isNew && isset($configuration['renderType']) && $configuration['renderType'] === 'selectCheckBox') {
             return '';
+        }
+
+        foreach (($configuration['items'] ?? []) as $item) {
+            if ($item['value'] === $value) {
+                return $value;
+            }
         }
 
         if (array_key_exists('default', $configuration)) {
@@ -8796,13 +8682,14 @@ class DataHandler
     {
         // Set title value to check for:
         $checkTitle = $value;
+        $labelToAppend = $this->prependLabel($table);
         if ($count > 0) {
-            $checkTitle = $value . rtrim(' ' . sprintf($this->prependLabel($table), $count));
+            $checkTitle = $value . rtrim(' ' . sprintf($labelToAppend, $count));
         }
         // Do check:
         if ($prevTitle != $checkTitle || $count < 100) {
             $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-            $this->addDeleteRestriction($queryBuilder->getRestrictions()->removeAll());
+            $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
             $rowCount = $queryBuilder
                 ->count('uid')
                 ->from($table)
@@ -8812,7 +8699,9 @@ class DataHandler
                 )
                 ->executeQuery()
                 ->fetchOne();
-            if ($rowCount) {
+            // Only call getCopyHeader() again, if $labelToAppend is actually filled, otherwise we execute
+            // superfluous calls to the DB
+            if ($rowCount && $labelToAppend !== '') {
                 return $this->getCopyHeader($table, $pid, $field, $value, $count + 1, $checkTitle);
             }
         }
@@ -8825,7 +8714,6 @@ class DataHandler
      *
      * @param string $table Table name
      * @return string Label to append, containing "%s" for the number
-     * @see getCopyHeader()
      */
     protected function prependLabel($table): string
     {
@@ -8839,25 +8727,18 @@ class DataHandler
      * Get the final pid based on $table and $pid ($destPid type... pos/neg)
      *
      * @param string $table Table name
-     * @param int $pid "Destination pid" : If the value is >= 0 it's just returned directly (through (int)though) but if the value is <0 then the method looks up the record with the uid equal to abs($pid) (positive number) and returns the PID of that record! The idea is that negative numbers point to the record AFTER WHICH the position is supposed to be!
-     * @return int
+     * @param int $pid "Destination pid": If the value is >= 0 it's just returned directly (through (int)though) but if the
+     *                 value is <0 then the method looks up the record with the uid equal to abs($pid) (positive number) and
+     *                 returns the PID of that record! The idea is that negative numbers point to the record AFTER WHICH the
+     *                 position is supposed to be!
      * @internal should only be used from within DataHandler
      */
     public function resolvePid($table, $pid): int
     {
-        $pid = (int)$pid;
-        if ($pid < 0) {
-            $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-            $queryBuilder->getRestrictions()->removeAll();
-            $row = $queryBuilder
-                ->select('pid')
-                ->from($table)
-                ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter(abs($pid), Connection::PARAM_INT)))
-                ->executeQuery()
-                ->fetchAssociative();
-            $pid = (int)$row['pid'];
+        if ($pid >= 0) {
+            return (int)$pid;
         }
-        return $pid;
+        return (int)(BackendUtility::getRecord($table, abs((int)$pid), 'pid', '', false)['pid']);
     }
 
     /**
@@ -8872,41 +8753,6 @@ class DataHandler
     {
         $regex = '/\s' . sprintf(preg_quote($this->prependLabel($table)), '[0-9]*') . '$/';
         return @preg_replace($regex, '', $value);
-    }
-
-    /**
-     * Check if there are records from tables on the pages to be deleted which the current user is not allowed to
-     *
-     * @param int[] $pageIds IDs of pages which should be checked
-     * @return string[]|null Return null, if permission granted, otherwise an array with the tables that are not allowed to be deleted
-     * @see canDeletePage()
-     */
-    protected function checkForRecordsFromDisallowedTables(array $pageIds): ?array
-    {
-        if ($this->admin) {
-            return null;
-        }
-        $disallowedTables = [];
-        if (!empty($pageIds)) {
-            foreach ($this->tcaSchemaFactory->all() as $schema) {
-                $table = $schema->getName();
-                $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
-                $queryBuilder->getRestrictions()->removeAll()
-                    ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
-                $count = $queryBuilder->count('uid')
-                    ->from($table)
-                    ->where($queryBuilder->expr()->in(
-                        'pid',
-                        $queryBuilder->createNamedParameter($pageIds, Connection::PARAM_INT_ARRAY)
-                    ))
-                    ->executeQuery()
-                    ->fetchOne();
-                if ($count && ($schema->hasCapability(TcaSchemaCapability::AccessReadOnly) || !$this->checkModifyAccessList($table))) {
-                    $disallowedTables[] = $table;
-                }
-            }
-        }
-        return !empty($disallowedTables) ? $disallowedTables : null;
     }
 
     /**
@@ -8928,12 +8774,6 @@ class DataHandler
         }
         return false;
     }
-
-    /******************************
-     *
-     * Clearing cache
-     *
-     ******************************/
 
     /**
      * Clearing the cache based on a page being updated
@@ -9006,9 +8846,8 @@ class DataHandler
      * @param int $uid UID of record for which the cache needs to be cleared
      * @param int $pid Original pid of the page of the record which the cache needs to be cleared
      * @return array Array with tagsToClear and clearCacheCommands
-     * @internal This function is internal only it may be changed/removed also in minor version numbers.
      */
-    protected function prepareCacheFlush($table, $uid, $pid): array
+    protected function prepareCacheFlush(string $table, int $uid, $pid): array
     {
         $tagsToClear = [];
         $clearCacheCommands = [];
@@ -9110,24 +8949,15 @@ class DataHandler
                 }
             } else {
                 // For other tables than "pages", delete cache for the records "parent page".
-                $pageIdsThatNeedCacheFlush[] = $pageUid = (int)$this->getPID($table, $uid);
-                // Add the parent page as well
-                if ($TSConfig['clearCache_pageGrandParent'] ?? false) {
-                    $parentQuery = $this->connectionPool->getQueryBuilderForTable('pages');
-                    $parentQuery->getRestrictions()
-                        ->removeAll()
-                        ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
-                    $parentPageRecord = $parentQuery
-                        ->select('pid')
-                        ->from('pages')
-                        ->where($parentQuery->expr()->eq(
-                            'uid',
-                            $parentQuery->createNamedParameter($pageUid, Connection::PARAM_INT)
-                        ))
-                        ->executeQuery()
-                        ->fetchAssociative();
-                    if (!empty($parentPageRecord)) {
-                        $pageIdsThatNeedCacheFlush[] = (int)$parentPageRecord['pid'];
+                $pageUid = (int)(BackendUtility::getRecord($table, $uid, 'pid', '', false)['pid'] ?? 0);
+                if ($pageUid > 0) {
+                    $pageIdsThatNeedCacheFlush[] = $pageUid;
+                    if ($TSConfig['clearCache_pageGrandParent'] ?? false) {
+                        // Add the parent page as well
+                        $grandPageUid = (int)(BackendUtility::getRecord('pages', $pageUid, 'pid')['pid'] ?? 0);
+                        if ($grandPageUid > 0) {
+                            $pageIdsThatNeedCacheFlush[] = $grandPageUid;
+                        }
                     }
                 }
             }
@@ -9151,7 +8981,7 @@ class DataHandler
             $clearCacheCommands = array_unique($commands);
         }
         // Call post-processing function for clear-cache:
-        $_params = ['table' => $table, 'uid' => $uid, 'uid_page' => $pageUid, 'TSConfig' => $TSConfig, 'tags' => $tagsToClear, 'clearCacheEnabled' => $clearCacheEnabled];
+        $_params = ['table' => $table, 'uid' => $uid, 'uid_page' => $pageUid, 'TSConfig' => $TSConfig, 'tags' => &$tagsToClear, 'clearCacheCommands' => &$clearCacheCommands, 'clearCacheEnabled' => $clearCacheEnabled];
         foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['clearCachePostProc'] ?? [] as $_funcRef) {
             GeneralUtility::callUserFunction($_funcRef, $_params, $this);
         }
@@ -9185,9 +9015,6 @@ class DataHandler
      * $cacheCmd='cacheTag:[string]'
      * Flush page cache by given tag
      *
-     * $cacheCmd='cacheId:[string]'
-     * Removes cache identifier from page and page section cache
-     *
      * Can call a list of post processing functions as defined in
      * $GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['clearCachePostProc']
      * (numeric array with values being the function references, called by
@@ -9198,9 +9025,7 @@ class DataHandler
      */
     public function clear_cacheCmd($cacheCmd): void
     {
-        if (is_object($this->BE_USER)) {
-            $this->BE_USER->writeLog(SystemLogType::CACHE, SystemLogCacheAction::CLEAR, SystemLogErrorClassification::MESSAGE, 0, 'User {username} has cleared the cache (cacheCmd={command})', ['username' => $this->BE_USER->user['username'], 'command' => $cacheCmd]);
-        }
+        $this->BE_USER->writeLog(SystemLogType::CACHE, SystemLogCacheAction::CLEAR, SystemLogErrorClassification::MESSAGE, null, 'User {username} has cleared the cache (cacheCmd={command})', ['username' => $this->BE_USER->user['username'], 'command' => $cacheCmd]);
         $userTsConfig = $this->BE_USER->getTSConfig();
         switch (strtolower($cacheCmd)) {
             case 'pages':
@@ -9263,30 +9088,22 @@ class DataHandler
         }
     }
 
-    /*****************************
-     *
-     * Logging
-     *
-     *****************************/
     /**
      * Logging actions from DataHandler
      *
      * @param string $table Table name the log entry is concerned with. Blank if NA
      * @param int $recuid Record UID. Zero if NA
      * @param int $action Action number: 0=No category, 1=new record, 2=update record, 3= delete record, 4= move record, 5= Check/evaluate
-     * @param int|string $recpid Normally 0 (zero). If set, it indicates that this log-entry is used to notify the backend of a record which is moved to another location
+     * @param null $_ unused
      * @param int $error The severity: 0 = message, 1 = error, 2 = System Error, 3 = security notice (admin), 4 warning
      * @param string $details Default error message in english
-     * @param int $details_nr This number is unique for every combination of $type and $action. This is the error-message number, which can later be used to translate error messages. 0 if not categorized, -1 if temporary
+     * @param null $__ unused
      * @param array $data Array with special information that may go into $details by '%s' marks / sprintf() when the log is shown
      * @param int $event_pid The page_uid (pid) where the event occurred. Used to select log-content for specific pages.
-     * @param string $NEWid NEW id for new records
      * @return int Log entry UID (0 if no log entry was written or logging is disabled)
-     * @see \TYPO3\CMS\Core\SysLog\Action\Database for all available values of argument $action
-     * @see \TYPO3\CMS\Core\SysLog\Error for all available values of argument $error
      * @internal should only be used from within TYPO3 Core
      */
-    public function log($table, $recuid, $action, $recpid, $error, $details, $details_nr = -1, $data = [], $event_pid = -1, $NEWid = '')
+    public function log($table, $recuid, $action, $_, $error, $details, $__ = null, array $data = [], $event_pid = -1)
     {
         if (!$this->enableLogging) {
             return 0;
@@ -9297,12 +9114,10 @@ class DataHandler
         }
         if ($error > 0) {
             $detailMessage = $details;
-            if (is_array($data)) {
-                $detailMessage = $this->formatLogDetails($detailMessage, $data);
-            }
-            $this->errorLog[] = '[' . SystemLogType::DB . '.' . $action . '.' . $details_nr . ']: ' . $detailMessage;
+            $detailMessage = $this->formatLogDetails($detailMessage, $data);
+            $this->errorLog[] = '[' . SystemLogType::DB . '.' . $action . ']: ' . $detailMessage;
         }
-        return $this->BE_USER->writelog(SystemLogType::DB, $action, $error, $details_nr, $details, $data, $table, abs((int)$recuid), $recpid, $event_pid, $NEWid);
+        return $this->BE_USER->writelog(SystemLogType::DB, $action, $error, null, $details, $data, $table, abs((int)$recuid), null, $event_pid);
     }
 
     /**
@@ -9347,12 +9162,6 @@ class DataHandler
         return $affectedRecords;
     }
 
-    /*****************************
-     *
-     * Internal (do not use outside Core!)
-     *
-     *****************************/
-
     /**
      * Find out if the record is a localization. If so, get the uid of the default language page.
      * Always returns the uid of the workspace live record: No explicit workspace overlay is applied.
@@ -9364,7 +9173,7 @@ class DataHandler
     {
         $languageCapability = $this->tcaSchemaFactory->get('pages')->getCapability(TcaSchemaCapability::Language);
         $localizationParentFieldName = $languageCapability->getTranslationOriginPointerField()->getName();
-        $row = $this->recordInfo('pages', $pageId);
+        $row = BackendUtility::getRecord('pages', $pageId, '*', '', false);
         $localizationParent = (int)($row[$localizationParentFieldName] ?? 0);
         if ($localizationParent > 0) {
             return $localizationParent;
@@ -9398,23 +9207,6 @@ class DataHandler
             }
         }
         return $result;
-    }
-
-    /**
-     * Determines whether a particular record has been deleted
-     * using DataHandler::deleteRecord() in this instance.
-     *
-     * @param string $tableName
-     * @param int $uid
-     * @return bool
-     * @internal should only be used from within TYPO3 Core
-     */
-    public function hasDeletedRecord($tableName, $uid)
-    {
-        return
-            !empty($this->deletedRecords[$tableName])
-            && in_array($uid, $this->deletedRecords[$tableName])
-        ;
     }
 
     /**
@@ -9496,7 +9288,6 @@ class DataHandler
      * @param int $id UID of record
      * @param int|null $recpid PID of record
      * @return bool TRUE if ok.
-     * @internal should only be used from within TYPO3 Core
      */
     protected function workspaceAllowAutoCreation(string $table, $id, $recpid): bool
     {
@@ -9524,7 +9315,6 @@ class DataHandler
      * @param string $table Table of record
      * @param array $record array where fields are at least: pid, t3ver_wsid, t3ver_stage (if versioningWS is set)
      * @return string String error code, telling the failure state. FALSE=All ok
-     * @see workspaceCannotEditRecord()
      * @internal this method will be moved to EXT:workspaces
      */
     public function workspaceCannotEditOfflineVersion(string $table, array $record)
@@ -9864,5 +9654,615 @@ class DataHandler
     public function getHistoryRecords(): array
     {
         return $this->historyRecords;
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Table name to move
+     * @param int $uid Record uid to move
+     * @param int $destPid Position to move to: $destPid: >=0 then it points to a page-id on which to insert the record (as the first element). <0 then it points to a uid from its own table after which to insert it (works if
+     * @internal should only be used from within DataHandler
+     */
+    public function moveRecord_raw($table, $uid, $destPid): void
+    {
+        $schema = $this->tcaSchemaFactory->get($table);
+        $origDestPid = $destPid;
+        // This is the actual pid of the moving to destination
+        $resolvedPid = $this->resolvePid($table, $destPid);
+        // Checking if the pid is negative, but no sorting row is defined. In that case, find the correct pid.
+        // Basically this check make the error message 4-13 meaning less... But you can always remove this check if you
+        // prefer the error instead of a no-good action (which is to move the record to its own page...)
+        if (($destPid < 0 && !$schema->hasCapability(TcaSchemaCapability::SortByField)) || $destPid >= 0) {
+            $destPid = $resolvedPid;
+        }
+        // Get this before we change the pid (for logging)
+        $propArr = $this->getRecordProperties($table, $uid);
+        $moveRec = $this->getRecordProperties($table, $uid, true);
+        // Prepare user defined objects (if any) for hooks which extend this function:
+        $hookObjectsArr = [];
+        foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['moveRecordClass'] ?? [] as $className) {
+            $hookObjectsArr[] = GeneralUtility::makeInstance($className);
+        }
+        // Timestamp field:
+        $updateFields = [];
+        if ($schema->hasCapability(TcaSchemaCapability::UpdatedAt)) {
+            $updateFields[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()] = $GLOBALS['EXEC_TIME'];
+        }
+
+        // Check if this is a translation of a page, if so then it just needs to be kept "sorting" in sync
+        // Usually called from moveL10nOverlayRecords()
+        if ($table === 'pages') {
+            $defaultLanguagePageUid = $this->getDefaultLanguagePageId((int)$uid);
+            // In workspaces, the default language page may have been moved to a different pid than the
+            // default language page record of live workspace. In this case, localized pages need to be
+            // moved to the pid of the workspace move record.
+            $defaultLanguagePageWorkspaceOverlay = BackendUtility::getWorkspaceVersionOfRecord((int)$this->BE_USER->workspace, 'pages', $defaultLanguagePageUid, 'uid');
+            if (is_array($defaultLanguagePageWorkspaceOverlay)) {
+                $defaultLanguagePageUid = (int)$defaultLanguagePageWorkspaceOverlay['uid'];
+            }
+            if ($defaultLanguagePageUid !== (int)$uid) {
+                // If the default language page has been moved, localized pages need to be moved to
+                // that pid and sorting, too.
+                $originalTranslationRecord = BackendUtility::getRecord($table, $defaultLanguagePageUid, '*', '', false);
+                $updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()] = $originalTranslationRecord[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()];
+                $destPid = $originalTranslationRecord['pid'];
+            }
+        }
+
+        // Insert as first element on page (where uid = $destPid)
+        if ($destPid >= 0) {
+            if ($table !== 'pages' || $this->destNotInsideSelf($destPid, $uid)) {
+                // Clear cache before moving
+                [$parentUid] = BackendUtility::getTSCpid($table, $uid, '');
+                $this->registerRecordIdForPageCacheClearing($table, $uid, $parentUid);
+                // Setting PID
+                $updateFields['pid'] = $destPid;
+                // Table is sorted by 'sortby'
+                if ($schema->hasCapability(TcaSchemaCapability::SortByField) && !isset($updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()])) {
+                    $sortNumber = $this->getSortNumber($table, $uid, $destPid);
+                    $updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()] = $sortNumber;
+                }
+                // Check for child records that have also to be moved
+                $this->moveRecord_procFields($table, $uid, $destPid);
+                // Create query for update:
+                $this->connectionPool->getConnectionForTable($table)
+                    ->update($table, $updateFields, ['uid' => (int)$uid]);
+                // Check for the localizations of that element
+                $this->moveL10nOverlayRecords($table, $uid, $destPid, $destPid);
+                // Call post-processing hooks:
+                foreach ($hookObjectsArr as $hookObj) {
+                    if (method_exists($hookObj, 'moveRecord_firstElementPostProcess')) {
+                        $hookObj->moveRecord_firstElementPostProcess($table, $uid, $destPid, $moveRec, $updateFields, $this);
+                    }
+                }
+
+                $this->getRecordHistoryStore()->moveRecord($table, $uid, ['oldPageId' => $propArr['pid'], 'newPageId' => $destPid, 'oldData' => $propArr, 'newData' => $updateFields], $this->correlationId);
+                if ($this->enableLogging) {
+                    // Logging...
+                    $oldpagePropArr = $this->getRecordProperties('pages', $propArr['pid']);
+                    if ($destPid != $propArr['pid']) {
+                        // Logged to old page
+                        $newPropArr = $this->getRecordProperties($table, $uid);
+                        $newpagePropArr = $this->getRecordProperties('pages', $destPid);
+                        $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) to page "{pageTitle}" ({pid})', null, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $newpagePropArr['header'], 'pid' => $newPropArr['pid']], $propArr['pid']);
+                        // Logged to new page
+                        $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) from page "{pageTitle}" ({pid}))', null, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $oldpagePropArr['header'], 'pid' => $propArr['pid']], $destPid);
+                    } else {
+                        // Logged to new page
+                        $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) on page "{pageTitle}" ({pid})', null, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $oldpagePropArr['header'], 'pid' => $propArr['pid']], $destPid);
+                    }
+                }
+                // Clear cache after moving
+                $this->registerRecordIdForPageCacheClearing($table, $uid);
+                $this->fixUniqueInPid($table, $uid);
+                $this->fixUniqueInSite($table, (int)$uid);
+                if ($table === 'pages') {
+                    $this->fixUniqueInSiteForSubpages((int)$uid);
+                }
+            } elseif ($this->enableLogging) {
+                $destPropArr = $this->getRecordProperties('pages', $destPid);
+                $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move page "{title}" ({uid}) to inside of its own rootline (at page "{pageTitle}" ({pid}))', null, ['title' => $propArr['header'], 'uid' => $uid, 'pageTitle' => $destPropArr['header'], 'pid' => $destPid], $propArr['pid']);
+            }
+        } elseif ($schema->hasCapability(TcaSchemaCapability::SortByField)) {
+            // Put after another record
+            // Table is being sorted
+            // Save the position to which the original record is requested to be moved
+            $originalRecordDestinationPid = $destPid;
+            $sortInfo = $this->getSortNumber($table, $uid, $destPid);
+            // If not an array, there was an error (which is already logged)
+            if (is_array($sortInfo)) {
+                // Setting the destPid to the new pid of the record.
+                $destPid = $sortInfo['pid'];
+                if ($table !== 'pages' || $this->destNotInsideSelf($destPid, $uid)) {
+                    // clear cache before moving
+                    $this->registerRecordIdForPageCacheClearing($table, $uid);
+                    // We now update the pid and sortnumber (if not set for page translations)
+                    $updateFields['pid'] = $destPid;
+                    if (!isset($updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()])) {
+                        $updateFields[$schema->getCapability(TcaSchemaCapability::SortByField)->getFieldName()] = $sortInfo['sortNumber'];
+                    }
+                    // Check for child records that have also to be moved
+                    $this->moveRecord_procFields($table, $uid, $destPid);
+                    // Create query for update:
+                    $this->connectionPool->getConnectionForTable($table)
+                        ->update($table, $updateFields, ['uid' => (int)$uid]);
+                    // Check for the localizations of that element
+                    $this->moveL10nOverlayRecords($table, $uid, $destPid, $originalRecordDestinationPid);
+                    // Call post-processing hooks:
+                    foreach ($hookObjectsArr as $hookObj) {
+                        if (method_exists($hookObj, 'moveRecord_afterAnotherElementPostProcess')) {
+                            $hookObj->moveRecord_afterAnotherElementPostProcess($table, $uid, $destPid, $origDestPid, $moveRec, $updateFields, $this);
+                        }
+                    }
+                    $this->getRecordHistoryStore()->moveRecord($table, $uid, ['oldPageId' => $propArr['pid'], 'newPageId' => $destPid, 'oldData' => $propArr, 'newData' => $updateFields], $this->correlationId);
+                    if ($this->enableLogging) {
+                        // Logging...
+                        $oldpagePropArr = $this->getRecordProperties('pages', $propArr['pid']);
+                        if ($destPid != $propArr['pid']) {
+                            // Logged to old page
+                            $newPropArr = $this->getRecordProperties($table, $uid);
+                            $newpagePropArr = $this->getRecordProperties('pages', $destPid);
+                            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) to page "{pageTitle}" ({pid})', null, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $newpagePropArr['header'], 'pid' => $newPropArr['pid']], $propArr['pid']);
+                            // Logged to old page
+                            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) from page "{pageTitle}" ({pid})', null, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $oldpagePropArr['header'], 'pid' => $propArr['pid']], $destPid);
+                        } else {
+                            // Logged to old page
+                            $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::MESSAGE, 'Moved record "{title}" ({table}:{uid}) on page "{pageTitle}" ({pid})', null, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid, 'pageTitle' => $oldpagePropArr['header'], 'pid' => $propArr['pid']], $destPid);
+                        }
+                    }
+                    // Clear cache after moving
+                    $this->registerRecordIdForPageCacheClearing($table, $uid);
+                    $this->fixUniqueInPid($table, $uid);
+                    $this->fixUniqueInSite($table, (int)$uid);
+                    if ($table === 'pages') {
+                        $this->fixUniqueInSiteForSubpages((int)$uid);
+                    }
+                } elseif ($this->enableLogging) {
+                    $destPropArr = $this->getRecordProperties('pages', $destPid);
+                    $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move page "{title}" ({uid}) to inside of its own rootline (at page "{pageTitle}" [{pid}])', null, ['title' => $propArr['header'], 'uid' => $uid, 'pageTitle' => $destPropArr['header'], 'pid' => $destPid], $propArr['pid']);
+                }
+            } else {
+                $this->log($table, $uid, SystemLogDatabaseAction::MOVE, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to move record "{title}" ({table}:{uid}) to after another record, although the table has no sorting row', null, ['title' => $propArr['header'], 'table' => $table, 'uid' => $uid], $propArr['event_pid']);
+            }
+        }
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Record Table
+     * @param int $uid Record UID
+     * @param int $destPid Position to move to
+     * @internal should only be used from within DataHandler
+     */
+    public function moveRecord_procFields($table, $uid, $destPid): void
+    {
+        $row = BackendUtility::getRecordWSOL($table, $uid);
+        if (is_array($row) && (int)$destPid !== (int)$row['pid']) {
+            $schema = $this->tcaSchemaFactory->get($table);
+            foreach ($row as $field => $value) {
+                $conf = $schema->hasField($field) ? $schema->getField($field)->getConfiguration() : [];
+                if (($conf['behaviour']['disableMovingChildrenWithParent'] ?? false)
+                    || !in_array($this->getRelationFieldType($conf), ['list', 'field'], true)
+                ) {
+                    continue;
+                }
+                $dbAnalysis = $this->createRelationHandlerInstance();
+                $dbAnalysis->start($value, $conf['foreign_table'], '', $uid, $table, $conf);
+                // Moving records to a positive destination will insert each
+                // record at the beginning, thus the order is reversed here:
+                foreach (array_reverse($dbAnalysis->itemArray) as $item) {
+                    $this->moveRecord($item['table'], (int)$item['id'], $table === 'pages' ? $uid : $destPid);
+                }
+            }
+        }
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Record Table
+     * @param int $uid Record UID
+     * @param int $destPid Position to move to
+     * @param string $value Record field value
+     * @param array $conf TCA configuration of current field
+     * @internal should only be used from within DataHandler
+     */
+    public function moveRecord_procBasedOnFieldType($table, $uid, $destPid, $value, $conf): void
+    {
+        if (($conf['behaviour']['disableMovingChildrenWithParent'] ?? false)
+            || !in_array($this->getRelationFieldType($conf), ['list', 'field'], true)
+        ) {
+            return;
+        }
+        if ($table === 'pages') {
+            // If the relations are related to a page record, make sure they reside at that page and not at its parent
+            $destPid = $uid;
+        }
+        $dbAnalysis = $this->createRelationHandlerInstance();
+        $dbAnalysis->start($value, $conf['foreign_table'], '', $uid, $table, $conf);
+        // Moving records to a positive destination will insert each
+        // record at the beginning, thus the order is reversed here:
+        foreach (array_reverse($dbAnalysis->itemArray) as $item) {
+            $this->moveRecord($item['table'], (int)$item['id'], $destPid);
+        }
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Table name
+     * @param int $id Uid of record
+     * @param bool $noWSOL If set, no workspace overlay is performed
+     * @return array|null Properties of record
+     * @internal should only be used from within DataHandler
+     */
+    public function getRecordProperties($table, $id, $noWSOL = false): ?array
+    {
+        if (!$this->tcaSchemaFactory->has($table)) {
+            return null;
+        }
+        $row = $table === 'pages' && !$id
+            ? ['title' => '[root-level]', 'uid' => 0, 'pid' => 0]
+            : BackendUtility::getRecord($table, $id, '*', '', false);
+        if (!$noWSOL) {
+            BackendUtility::workspaceOL($table, $row);
+        }
+        $liveUid = ($row['t3ver_oid'] ?? null) ?: ($row['uid'] ?? null);
+        $fullRow = BackendUtility::getRecord($table, $liveUid, '*', '', false);
+        return [
+            'header' => BackendUtility::getRecordTitle($table, $fullRow ?: $row),
+            'pid' => $row['pid'] ?? null,
+            'event_pid' => $table === 'pages' ? (int)$liveUid : ($row['pid'] ?? null),
+            't3ver_state' => $this->tcaSchemaFactory->get($table)->isWorkspaceAware() ? ($row['t3ver_state'] ?? '') : '',
+        ];
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Table name
+     * @param array $row Input row
+     * @return array|null Output array
+     * @internal should only be used from within DataHandler
+     */
+    public function getRecordPropertiesFromRow($table, $row)
+    {
+        if ($this->tcaSchemaFactory->has($table)) {
+            $liveUid = ($row['t3ver_oid'] ?? null) ?: ($row['uid'] ?? null);
+            $fullRow = BackendUtility::getRecord($table, $liveUid, '*', '', false);
+            return [
+                'header' => BackendUtility::getRecordTitle($table, $fullRow ?: $row),
+                'pid' => $row['pid'] ?? null,
+                'event_pid' => $table === 'pages' ? (int)$liveUid : ($row['pid'] ?? null),
+                't3ver_state' => $this->tcaSchemaFactory->get($table)->isWorkspaceAware() ? ($row['t3ver_state'] ?? '') : '',
+            ];
+        }
+        return null;
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Table name
+     * @param int $id UID of record
+     * @return bool Returns TRUE if OK. Cached results.
+     * @internal should only be used from within DataHandler
+     */
+    public function isRecordInWebMount($table, $id)
+    {
+        if (!$this->tcaSchemaFactory->has($table) || (int)$id === 0) {
+            return false;
+        }
+        $record = BackendUtility::getRecord($table, $id, '*', '', false);
+        BackendUtility::workspaceOL($table, $record);
+        $liveUid = ($record['t3ver_oid'] ?? null) ?: ($record['uid'] ?? null);
+        $eventPid = $table === 'pages' ? (int)$liveUid : ($record['pid'] ?? null);
+        return $this->isInWebMount($eventPid);
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param int $pid Page ID to check
+     * @return bool TRUE if OK. Cached results.
+     * @internal should only be used from within DataHandler
+     */
+    public function isInWebMount($pid)
+    {
+        return (bool)$this->BE_USER->isInWebMount($pid);
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Record table
+     * @param int $id Record UID
+     * @return bool Returns TRUE if the user may update the record given by $table and $id
+     * @internal should only be used from within DataHandler
+     */
+    public function checkRecordUpdateAccess($table, $id): bool
+    {
+        $res = false;
+        if ($this->tcaSchemaFactory->has($table) && (int)$id > 0) {
+            $cacheId = 'checkRecordUpdateAccess_' . $table . '_' . $id;
+            // If information is cached, return it
+            $cachedValue = $this->runtimeCache->get($cacheId);
+            if (!empty($cachedValue)) {
+                // @todo: This cache is at least broken with false results.
+                //        Caching 'false' as result below makes !empty() here never kick in, so
+                //        caching negative result does not work and always triggers code execution.
+                //        Also, CF tends to mix up false as cache-value with 'there is no cache entry',
+                //        depending on used cache backend, which also may be the reason int 1 is used
+                //        instead of bool true, so '@return bool' annotation is clearly invalid.
+                //        Note there is another cache in doesRecordExist_pageLookUp() code path, too.
+                return $cachedValue;
+            }
+            if ($table === 'pages' || ($table === 'sys_file_reference' && array_key_exists('pages', $this->datamap))) {
+                // @todo: find a more generic way to handle content relations of a page (without needing content editing access to that page)
+                $perms = Permission::PAGE_EDIT;
+            } else {
+                $perms = Permission::CONTENT_EDIT;
+            }
+            if (is_array($this->recordInfoWithPermissionCheck($table, $id, $perms))) {
+                $res = 1;
+            }
+            // Cache the result
+            $this->runtimeCache->set($cacheId, $res);
+        }
+        return (bool)$res;
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $insertTable Tablename to check
+     * @param int $pid Integer PID
+     * @param int $action For logging: Action number.
+     * @return bool Returns TRUE if the user may insert a record from table $insertTable on page $pid
+     * @internal should only be used from within DataHandler
+     */
+    public function checkRecordInsertAccess($insertTable, $pid, $action = SystemLogDatabaseAction::INSERT): bool
+    {
+        $pid = (int)$pid;
+        if ($pid < 0) {
+            return false;
+        }
+        if ($insertTable === 'pages') {
+            $perms = Permission::PAGE_NEW;
+        } elseif (($insertTable === 'sys_file_reference') && array_key_exists('pages', $this->datamap)) {
+            // @todo: find a more generic way to handle content relations of a page (without needing content editing access to that page)
+            $perms = Permission::PAGE_EDIT;
+        } else {
+            $perms = Permission::CONTENT_EDIT;
+        }
+        $pageExists = is_array($this->recordInfoWithPermissionCheck('pages', $pid, $perms));
+        if (!$pageExists && ($pid !== 0 || (!$this->admin && !BackendUtility::isRootLevelRestrictionIgnored($insertTable)))) {
+            // If page does not exist, it can still be an attempt to add to pid 0. Check this case
+            // and deny record insert by looking at admin flag and TCA root level restriction as well.
+            $this->log($insertTable, $pid, $action, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert a record of "{table}" on page:{pid} without permissions or non-existing page', null, ['pid' => $pid, 'table' => $insertTable], $pid);
+            return false;
+        }
+        if (!$this->isTableAllowedForThisPageObsolete($pid, $insertTable)) {
+            $this->log($insertTable, $pid, $action, null, SystemLogErrorClassification::USER_ERROR, 'Attempt to insert record on page:{pid} where table "{table}" is not allowed', null, ['pid' => $pid, 'table' => $insertTable], $pid);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param int $pageUid Page id for which to check, including 0 (zero) if checking for page tree root.
+     * @param string $checkTable Table name to check
+     * @return bool TRUE if OK
+     */
+    protected function isTableAllowedForThisPageObsolete(int $pageUid, $checkTable): bool
+    {
+        $schema = $this->tcaSchemaFactory->get($checkTable);
+        /** @var RootLevelCapability $rootLevelCapability */
+        $rootLevelCapability = $schema->getCapability(TcaSchemaCapability::RestrictionRootLevel);
+        // Check if rootLevel flag is set and we're trying to insert on rootLevel - and reversed - and that the table is not "pages" which are allowed anywhere.
+        if ($checkTable !== 'pages' && $rootLevelCapability->getRootLevelType() !== RootLevelCapability::TYPE_BOTH && ($rootLevelCapability->getRootLevelType() xor !$pageUid)) {
+            return false;
+        }
+        $allowed = false;
+        // Check root-level
+        if (!$pageUid) {
+            if ($this->admin || $rootLevelCapability->shallIgnoreRootLevelRestriction()) {
+                $allowed = true;
+            }
+            return $allowed;
+        }
+        // Check non-root-level
+        $doktype = $this->pageInfo($pageUid, 'doktype');
+        return $this->pageDoktypeRegistry->isRecordTypeAllowedForDoktype($checkTable, (int)$doktype);
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param int $id Page uid
+     * @param string $field Field name for which to return value
+     */
+    protected function pageInfo(int $id, string $field): int|string|null
+    {
+        $queryBuilder = $this->connectionPool->getQueryBuilderForTable('pages');
+        $queryBuilder->getRestrictions()->removeAll();
+        $row = $queryBuilder
+            ->select('*')
+            ->from('pages')
+            ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
+            ->executeQuery()
+            ->fetchAssociative();
+        return $row[$field];
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Table name
+     * @param int $id UID of the record from $table
+     * @return array|null Returns the selected record on success, otherwise NULL.
+     * @internal should only be used from within DataHandler
+     */
+    public function recordInfo($table, $id)
+    {
+        // Skip, if searching for NEW records or there's no TCA table definition
+        if ((int)$id === 0 || !$this->tcaSchemaFactory->has($table)) {
+            return null;
+        }
+        $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
+        $queryBuilder->getRestrictions()->removeAll();
+        $result = $queryBuilder
+            ->select('*')
+            ->from($table)
+            ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
+            ->executeQuery()
+            ->fetchAssociative();
+        return $result ?: null;
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param string $table Record table name
+     * @param int $id Record UID
+     * @param int $perms Permission restrictions to observe: An integer that will be bitwise AND'ed.
+     * @return array<string,mixed>|false Row if exists and accessible, false otherwise
+     * @internal should only be used from within DataHandler
+     */
+    public function recordInfoWithPermissionCheck(string $table, int $id, int $perms): array|false
+    {
+        if ($this->bypassAccessCheckForRecords) {
+            $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
+            $queryBuilder->getRestrictions()->removeAll();
+            return $queryBuilder->select('*')
+                ->from($table)
+                ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
+                ->executeQuery()
+                ->fetchAssociative();
+        }
+        if (!$perms) {
+            throw new \RuntimeException('Internal ERROR: no permissions to check for non-admin user', 1270853921);
+        }
+        // For all tables: Check if record exists:
+        $isWebMountRestrictionIgnored = BackendUtility::isWebMountRestrictionIgnored($table);
+        if ($this->tcaSchemaFactory->has($table) && $id > 0 && ($this->admin || $isWebMountRestrictionIgnored || $this->isRecordInWebMount($table, $id))) {
+            if ($table === 'pages') {
+                return $this->doesRecordExist_pageLookUp($id, $perms);
+            }
+            // Find record without checking page
+            // @todo: This should probably check for editlock
+            $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
+            $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+            $output = $queryBuilder
+                ->select('*')
+                ->from($table)
+                ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($id, Connection::PARAM_INT)))
+                ->executeQuery()
+                ->fetchAssociative();
+            // If record found, check page as well:
+            if (is_array($output)) {
+                // Looking up the page for record:
+                $pageRec = $this->doesRecordExist_pageLookUp($output['pid'], $perms);
+                // Return TRUE if either a page was found OR if the PID is zero AND the user is ADMIN (in which case the record is at root-level):
+                $isRootLevelRestrictionIgnored = BackendUtility::isRootLevelRestrictionIgnored($table);
+                if (is_array($pageRec) || !$output['pid'] && ($this->admin || $isRootLevelRestrictionIgnored)) {
+                    return $output;
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @internal should only be used from within DataHandler
+     */
+    public function disableDeleteClause(): void {}
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @internal should only be used from within DataHandler
+     */
+    public function deleteClause($table): string
+    {
+        // Returns the proper delete-clause if any for a table from TCA
+        $schema = $this->tcaSchemaFactory->get($table);
+        if ($schema->hasCapability(TcaSchemaCapability::SoftDelete)) {
+            return ' AND ' . $table . '.' . $schema->getCapability(TcaSchemaCapability::SoftDelete)->getFieldName() . '=0';
+        }
+        return '';
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @internal should only be used from within DataHandler
+     */
+    public function getPID($table, $uid)
+    {
+        $queryBuilder = $this->connectionPool->getQueryBuilderForTable($table);
+        $queryBuilder->getRestrictions()->removeAll();
+        $queryBuilder->select('pid')
+            ->from($table)
+            ->where($queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($uid, Connection::PARAM_INT)));
+        if ($row = $queryBuilder->executeQuery()->fetchAssociative()) {
+            return $row['pid'];
+        }
+        return false;
+    }
+
+    /**
+     * Unused. Removed in TYPO3 v14.
+     *
+     * @param int $uid Page uid
+     * @param int $perms Permission integer
+     */
+    protected function doesRecordExist_pageLookUp(int $uid, int $perms): array|false
+    {
+        $page = BackendUtility::getRecord('pages', $uid);
+        if (!is_array($page)) {
+            return false;
+        }
+        if ($this->admin) {
+            return $page;
+        }
+        $beUserUid = $this->BE_USER->getUserId();
+        if (!$beUserUid) {
+            return false;
+        }
+        $permission = new Permission($perms);
+        $pagesSchema = $this->tcaSchemaFactory->get('pages');
+        $editLockFieldName = null;
+        $editLockCheck = false;
+        if ($pagesSchema->hasCapability(TcaSchemaCapability::EditLock)) {
+            $editLockFieldName = $pagesSchema->getCapability(TcaSchemaCapability::EditLock)->getFieldName();
+            if ($permission->editPagePermissionIsGranted() || $permission->deletePagePermissionIsGranted() || $permission->editContentPermissionIsGranted()) {
+                $editLockCheck = true;
+            }
+        }
+        $groupUids = [];
+        $groupCheck = false;
+        if (!empty($this->BE_USER->userGroupsUID)) {
+            $groupUids = $this->BE_USER->userGroupsUID;
+            $groupCheck = true;
+        }
+        if ((!$editLockCheck || (int)$page[$editLockFieldName] === 0)
+            && (
+                ((int)$page['perms_everybody'] & $perms) === $perms
+                || ((int)$page['perms_userid'] === $beUserUid && ((int)$page['perms_user'] & $perms) === $perms)
+                || ($groupCheck && in_array((int)$page['perms_groupid'], $groupUids, true) && ((int)$page['perms_group'] & $perms) === $perms)
+            )
+        ) {
+            // A PHP implementation of BackendUserAuthentication->getPagePermsClause() plus the editlock check.
+            return $page;
+        }
+        return false;
     }
 }

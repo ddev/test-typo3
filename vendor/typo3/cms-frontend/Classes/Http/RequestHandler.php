@@ -300,8 +300,10 @@ class RequestHandler implements RequestHandlerInterface
         if (!empty($docTypeParts)) {
             $pageRenderer->setXmlPrologAndDocType(implode(LF, $docTypeParts));
         }
+
         // See https://www.w3.org/International/questions/qa-html-language-declarations.en.html#attributes
-        $htmlTagAttributes[$docType->isXmlCompliant() ? 'xml:lang' : 'lang'] = $siteLanguage->getLocale()->getLanguageCode();
+        // and https://datatracker.ietf.org/doc/html/rfc5646
+        $htmlTagAttributes[$docType->isXmlCompliant() ? 'xml:lang' : 'lang'] = $siteLanguage->getHreflang();
 
         if ($docType->isXmlCompliant() || $docType === DocType::html5 && $xmlDocument) {
             // We add this to HTML5 to achieve a slightly better backwards compatibility
@@ -598,7 +600,7 @@ class RequestHandler implements RequestHandlerInterface
             GeneralUtility::callUserFunction($_funcRef, $_params, $_ref);
         }
 
-        $this->generateHrefLangTags($controller, $request);
+        $this->generateHrefLangTags($controller, $request, $pageRenderer);
         $this->generateMetaTagHtml($typoScriptPageArray['meta.'] ?? [], $controller->cObj);
 
         // Javascript inline and inline footer code
@@ -834,21 +836,22 @@ class RequestHandler implements RequestHandlerInterface
         return $htmlTag;
     }
 
-    protected function generateHrefLangTags(TypoScriptFrontendController $controller, ServerRequestInterface $request): void
+    protected function generateHrefLangTags(TypoScriptFrontendController $controller, ServerRequestInterface $request, PageRenderer $pageRenderer): void
     {
         $typoScriptConfigArray = $request->getAttribute('frontend.typoscript')->getConfigArray();
         if ($typoScriptConfigArray['disableHrefLang'] ?? false) {
             return;
         }
+        $endingSlash = $pageRenderer->getDocType()->isXmlCompliant() ? '/' : '';
         $hrefLangs = $this->eventDispatcher->dispatch(new ModifyHrefLangTagsEvent($request))->getHrefLangs();
         if (count($hrefLangs) > 1) {
             $data = [];
             foreach ($hrefLangs as $hrefLang => $href) {
-                $data[] = sprintf('<link %s/>', GeneralUtility::implodeAttributes([
+                $data[] = sprintf('<link %s%s>', GeneralUtility::implodeAttributes([
                     'rel' => 'alternate',
                     'hreflang' => $hrefLang,
                     'href' => $href,
-                ], true));
+                ], true), $endingSlash);
             }
             $controller->additionalHeaderData[] = implode(LF, $data);
         }

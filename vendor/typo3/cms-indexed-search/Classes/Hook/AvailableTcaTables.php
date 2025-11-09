@@ -17,35 +17,34 @@ declare(strict_types=1);
 
 namespace TYPO3\CMS\IndexedSearch\Hook;
 
+use Symfony\Component\DependencyInjection\Attribute\Autoconfigure;
 use TYPO3\CMS\Core\Imaging\IconFactory;
-use TYPO3\CMS\Core\Localization\LanguageService;
-use TYPO3\CMS\Core\Utility\GeneralUtility;
+use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
+use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 
 /**
  * @internal This class is a hook implementation and is not part of the TYPO3 Core API.
  */
-class AvailableTcaTables
+#[Autoconfigure(public: true)]
+readonly class AvailableTcaTables
 {
+    public function __construct(
+        private IconFactory $iconFactory,
+        private TcaSchemaFactory $tcaSchemaFactory,
+    ) {}
+
     /**
      * itemsProcFunc for adding all available TCA tables
      */
     public function populateTables(array &$fieldDefinition): void
     {
-        $iconFactory = GeneralUtility::makeInstance(IconFactory::class);
-
-        foreach ($GLOBALS['TCA'] as $tableName => $tableConfiguration) {
-            if ($tableConfiguration['ctrl']['adminOnly'] ?? false) {
-                // Hide "admin only" tables
+        foreach ($this->tcaSchemaFactory->all() as $name => $schema) {
+            // Hide "admin only" tables
+            if ($schema->hasCapability(TcaSchemaCapability::AccessAdminOnly)) {
                 continue;
             }
-            $label = ($tableConfiguration['ctrl']['title'] ?? '') ?: '';
-            $icon = $iconFactory->mapRecordTypeToIconIdentifier($tableName, []);
-            $fieldDefinition['items'][] = [$label, $tableName, $icon];
+            $icon = $this->iconFactory->mapRecordTypeToIconIdentifier($name, []);
+            $fieldDefinition['items'][] = ['label' => $schema->getTitle(), 'value' => $name, 'icon' => $icon];
         }
-    }
-
-    protected function getLanguageService(): LanguageService
-    {
-        return $GLOBALS['LANG'];
     }
 }

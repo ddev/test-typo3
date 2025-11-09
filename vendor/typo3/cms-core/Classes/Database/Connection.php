@@ -30,10 +30,12 @@ use Doctrine\DBAL\Types\Type;
 use Psr\Log\LoggerAwareInterface;
 use Psr\Log\LoggerAwareTrait;
 use TYPO3\CMS\Core\Cache\CacheManager;
+use TYPO3\CMS\Core\Database\Platform\PlatformInformation;
 use TYPO3\CMS\Core\Database\Query\BulkInsertQuery;
 use TYPO3\CMS\Core\Database\Query\Expression\ExpressionBuilder;
 use TYPO3\CMS\Core\Database\Query\QueryBuilder;
 use TYPO3\CMS\Core\Database\Schema\SchemaInformation;
+use TYPO3\CMS\Core\Package\Cache\PackageDependentCacheIdentifier;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 
 class Connection extends \Doctrine\DBAL\Connection implements LoggerAwareInterface
@@ -208,12 +210,20 @@ class Connection extends \Doctrine\DBAL\Connection implements LoggerAwareInterfa
      */
     public function bulkInsert(string $tableName, array $data, array $columns = [], array $types = []): int
     {
-        $query = GeneralUtility::makeInstance(BulkInsertQuery::class, $this, $tableName, $columns);
-        foreach ($data as $values) {
-            $this->ensureDatabaseValueTypes($tableName, $values, $types);
-            $query->addValues($values, $types);
+        $totalAffectedRows = 0;
+        $columnLength = $columns !== [] ? count($columns) : 1000;
+        $maxBindParameters = PlatformInformation::getMaxBindParameters($this->getDatabasePlatform());
+        $maxChunkSize = (int)(($maxBindParameters / $columnLength) / 2);
+        $chunks = array_chunk($data, $maxChunkSize);
+        foreach ($chunks as $chunk) {
+            $query = GeneralUtility::makeInstance(BulkInsertQuery::class, $this, $tableName, $columns);
+            foreach ($chunk as $values) {
+                $this->ensureDatabaseValueTypes($tableName, $values, $types);
+                $query->addValues($values, $types);
+            }
+            $totalAffectedRows += $query->execute();
         }
-        return $query->execute();
+        return $totalAffectedRows;
     }
 
     /**
@@ -351,7 +361,7 @@ class Connection extends \Doctrine\DBAL\Connection implements LoggerAwareInterfa
             $platform instanceof DoctrineMariaDBPlatform => 'MySQL' . $version,
             $platform instanceof DoctrineMySQLPlatform => 'MySQL' . $version,
             $platform instanceof DoctrinePostgreSQLPlatform => 'PostgreSQL' . $version,
-            default => (str_replace('Platform', '', array_reverse(explode('\\', $platform::class))[0] ?? '')) . $version,
+            default => (str_replace('Platform', '', array_reverse(explode('\\', $platform::class))[0])) . $version,
         };
     }
 
@@ -404,17 +414,17 @@ class Connection extends \Doctrine\DBAL\Connection implements LoggerAwareInterfa
     {
         // If types are incoming already (meaning they're hand over to insert() for instance), don't auto-set them.
         $setAllTypes = $types === [];
-        $tableDetails = $this->getSchemaInformation()->introspectTable($tableName);
+        $tableInfo = $this->getSchemaInformation()->getTableInfo($tableName);
         $databasePlatform = $this->getDatabasePlatform();
-        array_walk($data, function (mixed &$value, string $key) use ($tableDetails, $setAllTypes, &$types, $databasePlatform): void {
+        array_walk($data, function (mixed &$value, string $key) use ($tableInfo, $setAllTypes, &$types, $databasePlatform): void {
             $typeName = ($types[$key] ?? '');
             if (!$setAllTypes && is_string($typeName) && $typeName !== '' && Type::hasType($typeName)) {
                 $types[$key] = Type::getType($typeName)->getBindingType();
             } elseif ($typeName instanceof Type) {
                 $types[$key] = $typeName->getBindingType();
             }
-            if ($tableDetails->hasColumn($key)) {
-                $type = $tableDetails->getColumn($key)->getType();
+            if ($tableInfo->hasColumnInfo($key)) {
+                $type = $tableInfo->getColumnInfo($key)->getType();
                 if ($setAllTypes) {
                     $types[$key] = $type->getBindingType();
                 }
@@ -430,7 +440,9 @@ class Connection extends \Doctrine\DBAL\Connection implements LoggerAwareInterfa
     {
         return new SchemaInformation(
             $this,
-            GeneralUtility::makeInstance(CacheManager::class)->getCache('database_schema')
+            GeneralUtility::makeInstance(CacheManager::class)->getCache('runtime'),
+            GeneralUtility::makeInstance(CacheManager::class)->getCache('database_schema'),
+            GeneralUtility::makeInstance(PackageDependentCacheIdentifier::class),
         );
     }
 

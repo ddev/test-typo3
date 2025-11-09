@@ -12,9 +12,9 @@ namespace TYPO3Fluid\Fluid\Core\Compiler;
 use TYPO3Fluid\Fluid\Core\Parser\ParsedTemplateInterface;
 use TYPO3Fluid\Fluid\Core\Parser\ParsingState;
 use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\NodeInterface;
-use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\RootNode;
 use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\ViewHelperNode;
 use TYPO3Fluid\Fluid\Core\Rendering\RenderingContextInterface;
+use TYPO3Fluid\Fluid\Core\ViewHelper\ArgumentDefinition;
 
 /**
  * @internal Nobody should need to override this class.
@@ -23,6 +23,23 @@ use TYPO3Fluid\Fluid\Core\Rendering\RenderingContextInterface;
  */
 class TemplateCompiler
 {
+    /**
+     * Variable name to be used to transfer information about template sections
+     * from the ViewHelper context to the TemplateView and the TemplateCompiler
+     *
+     * @todo This data-shuffling between parser, compiler and renderer should be
+     *       avoided in the future.
+     */
+    public const SECTIONS_VARIABLE = '1457379500_sections';
+
+    /**
+     * Variable name to be used to transfer information about a template's layout
+     * from the ViewHelper context to the TemplateView and the TemplateCompiler
+     *
+     * @deprecated variable will no longer be necessary in Fluid v5
+     */
+    public const LAYOUT_VARIABLE = 'layoutName';
+
     public const MODE_NORMAL = 'normal';
     public const MODE_WARMUP = 'warmup';
 
@@ -155,7 +172,7 @@ class TemplateCompiler
             'Main Render function',
         );
 
-        $storedLayoutName = $parsingState->getVariableContainer()->get('layoutName');
+        $storedLayoutName = $parsingState->getUnevaluatedLayoutName();
         $templateCode = sprintf(
             '<?php' . chr(10) .
             '%s {' . chr(10) .
@@ -166,26 +183,27 @@ class TemplateCompiler
             '        return %s;' . chr(10) .
             '    }' . chr(10) .
             '    public function addCompiledNamespaces(\TYPO3Fluid\\Fluid\\Core\\Rendering\\RenderingContextInterface $renderingContext): void {' . chr(10) .
-            '        $renderingContext->getViewHelperResolver()->addNamespaces(%s);' . chr(10) .
+            '        $renderingContext->getViewHelperResolver()->setLocalNamespaces(%s);' . chr(10) .
             '    }' . chr(10) .
+            '    %s' . chr(10) .
+            '    %s' . chr(10) .
             '    %s' . chr(10) .
             '}' . chr(10),
             'class ' . $identifier . ' extends \TYPO3Fluid\Fluid\Core\Compiler\AbstractCompiledTemplate',
             $this->generateCodeForLayoutName($storedLayoutName),
             ($parsingState->hasLayout() ? 'true' : 'false'),
-            var_export($this->renderingContext->getViewHelperResolver()->getNamespaces(), true),
+            var_export($this->renderingContext->getViewHelperResolver()->getLocalNamespaces(), true),
+            $this->generateArgumentDefinitionsCodeFromParsingState($parsingState),
+            $this->generateAvailableSlotsCodeFromParsingState($parsingState),
             $generatedRenderFunctions,
         );
         $this->renderingContext->getCache()->set($identifier, $templateCode);
         return $templateCode;
     }
 
-    /**
-     * @todo this type is crazy, this should really be something like NodeInterface|string
-     */
-    protected function generateCodeForLayoutName(NodeInterface|string|int|float|null|bool $storedLayoutNameArgument): string
+    protected function generateCodeForLayoutName(NodeInterface|string|null $storedLayoutNameArgument): string
     {
-        if ($storedLayoutNameArgument instanceof RootNode) {
+        if ($storedLayoutNameArgument instanceof NodeInterface) {
             $convertedCode = $storedLayoutNameArgument->convert($this);
             $initialization = $convertedCode['initialization'];
             $execution = $convertedCode['execution'];
@@ -197,9 +215,9 @@ class TemplateCompiler
     protected function generateSectionCodeFromParsingState(ParsingState $parsingState): string
     {
         $generatedRenderFunctions = '';
-        if ($parsingState->getVariableContainer()->exists('1457379500_sections')) {
+        if ($parsingState->getVariableContainer()->exists(static::SECTIONS_VARIABLE)) {
             // @todo: refactor to $parsedTemplate->getSections()
-            $sections = $parsingState->getVariableContainer()->get('1457379500_sections');
+            $sections = $parsingState->getVariableContainer()->get(static::SECTIONS_VARIABLE);
             foreach ($sections as $sectionName => $sectionRootNode) {
                 $generatedRenderFunctions .= $this->generateCodeForSection(
                     // @todo: Verify this is *always* an instance of RootNode
@@ -211,6 +229,42 @@ class TemplateCompiler
             }
         }
         return $generatedRenderFunctions;
+    }
+
+    protected function generateArgumentDefinitionsCodeFromParsingState(ParsingState $parsingState): string
+    {
+        $argumentDefinitions = $parsingState->getArgumentDefinitions();
+        if ($argumentDefinitions === []) {
+            return '';
+        }
+        $argumentDefinitionsCode = array_map(
+            static fn(ArgumentDefinition $argumentDefinition): string => sprintf(
+                'new \\TYPO3Fluid\\Fluid\\Core\\ViewHelper\\ArgumentDefinition(%s, %s, %s, %s, %s, %s)',
+                var_export($argumentDefinition->getName(), true),
+                var_export($argumentDefinition->getType(), true),
+                var_export($argumentDefinition->getDescription(), true),
+                var_export($argumentDefinition->isRequired(), true),
+                var_export($argumentDefinition->getDefaultValue(), true),
+                var_export($argumentDefinition->getEscape(), true),
+            ),
+            $argumentDefinitions,
+        );
+        return 'public function getArgumentDefinitions(): array {' . chr(10) .
+            '        return [' . chr(10) .
+            '            ' . implode(',' . chr(10) . '            ', $argumentDefinitionsCode) . ',' . chr(10) .
+            '        ];' . chr(10) .
+            '    }';
+    }
+
+    protected function generateAvailableSlotsCodeFromParsingState(ParsingState $parsingState): string
+    {
+        $availableSlots = $parsingState->getAvailableSlots();
+        if ($availableSlots === []) {
+            return '';
+        }
+        return 'public function getAvailableSlots(): array {' . chr(10) .
+            '        return ' . var_export($availableSlots, true) . ';' . chr(10) .
+            '    }';
     }
 
     /**
@@ -255,6 +309,28 @@ class TemplateCompiler
             $methodName,
             $initialization,
             $execution,
+        );
+    }
+
+    /**
+     * Generates PHP code for the arguments part of ViewHelper calls in cached templates
+     *
+     * @param array{string: string|array{string: string}} $argumentsCode
+     * @return string
+     */
+    public function generateViewHelperArgumentsCode(array $argumentsCode): string
+    {
+        $lines = [];
+        foreach ($argumentsCode as $argumentName => $argumentCode) {
+            $lines[] = sprintf(
+                '\'%s\' => %s,',
+                $argumentName,
+                is_array($argumentCode) ? $this->generateViewHelperArgumentsCode($argumentCode) : $argumentCode,
+            );
+        }
+        return sprintf(
+            '[' . chr(10) . '%s' . chr(10) . ']',
+            implode(chr(10), $lines),
         );
     }
 

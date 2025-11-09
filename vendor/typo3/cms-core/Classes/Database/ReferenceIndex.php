@@ -314,7 +314,8 @@ class ReferenceIndex
             foreach ($tableTcaSchema->getFields() as $field) {
                 $fieldConfig = $field->getConfiguration();
                 if (!empty($fieldConfig['MM'] ?? '')
-                    && !empty($fieldConfig['allowed'] ?? '')
+                    // Catch type=group 'allowed' and type=select 'foreign_table' MM scenarios
+                    && (!empty($fieldConfig['allowed'] ?? '') || !empty($fieldConfig['foreign_table'] ?? ''))
                     && empty($fieldConfig['MM_opposite_field'] ?? '')
                 ) {
                     $tableHasLocalSideMmRelation = true;
@@ -431,7 +432,11 @@ class ReferenceIndex
             }
         }
         if (!$testOnly && !empty($relationsToInsert)) {
-            $connection->bulkInsert('sys_refindex', $relationsToInsert, array_keys(current($relationsToInsert)));
+            try {
+                $connection->bulkInsert('sys_refindex', $relationsToInsert, array_keys(current($relationsToInsert)));
+            } catch (\Exception $e) {
+                // Do nothing for the time being
+            }
         }
 
         // If any existing are left, they are not in the current set anymore. Remove them.
@@ -584,6 +589,42 @@ class ReferenceIndex
                     // @todo: Refactor RelationHandler / PlainDataResolver to (optionally?) return full child row record
                     $itemArray = $this->enrichInlineRelations(current($itemArray)['table'], $fieldRelations['itemArray']);
                 }
+                if ($field->isType(TableColumnType::INLINE, TableColumnType::GROUP, TableColumnType::SELECT)
+                    && $field instanceof RelationalFieldTypeInterface
+                    && $field->getRelationshipType() === RelationshipType::ManyToMany
+                ) {
+                    foreach ($itemArray as $itemKey => $item) {
+                        // Get rid of soft-deleted foreign records, those should not create refindex entries
+                        // @todo: It would be better if RelationHandler would not return soft-deleted MM rows. Unsure
+                        //        how to do that since RH only works on the MM table, but it could then also return
+                        //        the full foreign row along the way.
+                        // @todo: Expensive. This code could be optimized to fetch multiple records at once per foreign
+                        //        table, or make RH return full foreign rows in some hopefully efficient way.
+                        $foreignSideRecord = BackendUtility::getRecord($item['table'], (int)$item['id']);
+                        if ($foreignSideRecord === null) {
+                            // @todo: This mixes up ref_sorting when rows are removed here. Shouldn't be
+                            //        very problematic, though.
+                            unset($itemArray[$itemKey]);
+                            continue;
+                        }
+                        $itemTableSchema = $this->tcaSchemaFactory->get((string)$item['table']);
+                        if ($itemTableSchema->hasCapability(TcaSchemaCapability::RestrictionDisabledField)) {
+                            $disabledFieldName = $itemTableSchema->getCapability(TcaSchemaCapability::RestrictionDisabledField)->getFieldName();
+                            $itemArray[$itemKey][$disabledFieldName] = $foreignSideRecord[$disabledFieldName];
+                        }
+                        if ($itemTableSchema->hasCapability(TcaSchemaCapability::RestrictionStartTime)) {
+                            $starttimeFieldName = $itemTableSchema->getCapability(TcaSchemaCapability::RestrictionStartTime)->getFieldName();
+                            $itemArray[$itemKey][$starttimeFieldName] = $foreignSideRecord[$starttimeFieldName];
+                        }
+                        if ($itemTableSchema->hasCapability(TcaSchemaCapability::RestrictionEndTime)) {
+                            $endtimeFieldName = $itemTableSchema->getCapability(TcaSchemaCapability::RestrictionEndTime)->getFieldName();
+                            $itemArray[$itemKey][$endtimeFieldName] = $foreignSideRecord[$endtimeFieldName];
+                        }
+                        if ($itemTableSchema->hasCapability(TcaSchemaCapability::Workspace)) {
+                            $itemArray[$itemKey]['t3ver_state'] = $foreignSideRecord['t3ver_state'];
+                        }
+                    }
+                }
                 $sorting = 0;
                 foreach ($itemArray as $refRecord) {
                     $refTable = (string)$refRecord['table'];
@@ -604,9 +645,6 @@ class ReferenceIndex
                         'ref_table' => $refTable,
                         'ref_uid' => (int)$refRecord['id'],
                         'ref_field' => (string)($refRecord['fieldname'] ?? ''),
-                        // @todo: With MM records, the relation MM record has no hidden, starttime and endtime info, this
-                        //        has to be fetched from the actual related record. We may want to have additional
-                        //        tests for this and implement here properly.
                         'ref_hidden' => $refTcaTableSchema->hasCapability(TcaSchemaCapability::RestrictionDisabledField)
                             ? (int)($refRecord[$refTcaTableSchema->getCapability(TcaSchemaCapability::RestrictionDisabledField)->getFieldName()] ?? 0)
                             : 0,
@@ -722,7 +760,7 @@ class ReferenceIndex
                             'ref_table' => $refRecord['table'],
                             'ref_uid' => (int)$refRecord['id'],
                             'ref_field' => (string)($refRecord['fieldname'] ?? ''),
-                            // @todo: ref_hidden, ref_starttime, ref_endtime, ref_t3ver_state, ref_t3ver_state and ref_sorting need coverage and handling, see above.
+                            // @todo: ref_hidden, ref_starttime, ref_endtime, ref_t3ver_state, ref_t3ver_state and ref_sorting need coverage and handling.
                             'ref_hidden' => 0,
                             'ref_starttime' => 0,
                             'ref_endtime' => 2147483647,
@@ -844,7 +882,14 @@ class ReferenceIndex
             }
         }
         foreach ($itemArray as &$item) {
-            $item = array_merge($item, $rows[$item['id']]);
+            if (isset($rows[$item['id']])) {
+                // @todo: The isset() prevents a PHP array access warning here. It seems this can happen with
+                //        inline CSV since RelationHandler->realList() does not verify if attached records
+                //        really exist. There is probably a deeper issue with CSV lists here, see #106428 for
+                //        more information and reproduce. This area should have a closer look, it looks as if
+                //        "count" value instead of uid fields are hand over here - at least with tx_styleguide_inline_11.
+                $item = array_merge($item, $rows[$item['id']]);
+            }
         }
         return $itemArray;
     }
@@ -920,7 +965,7 @@ class ReferenceIndex
                     // Not a section but a simple field. Get its relations.
                     $fieldValue = $valueArray['data'][$sheetKey]['lDEF'][$sheetElementKey]['vDEF'];
                     $structurePath = $sheetKey . '/lDEF/' . $sheetElementKey . '/vDEF/';
-                    $databaseRelations = $this->getRelationsFromRelationField($tableName, $fieldValue, $sheetElementTca['config'] ?? [], (int)$row['uid'], $workspaceUid);
+                    $databaseRelations = $this->getRelationsFromRelationField($tableName, $fieldValue, $sheetElementTca['config'] ?? [], (int)$row['uid'], $workspaceUid, $row);
                     if (!empty($databaseRelations)) {
                         $flexRelations['db'][$structurePath] = $databaseRelations;
                     }
@@ -948,7 +993,7 @@ class ReferenceIndex
     /**
      * Check field configuration if it is a DB relation field and extract DB relations if any
      */
-    private function getRelationsFromRelationField(string $tableName, mixed $fieldValue, array $conf, int $uid, int $workspaceUid, array $row = []): array
+    private function getRelationsFromRelationField(string $tableName, mixed $fieldValue, array $conf, int $uid, int $workspaceUid, array $row): array
     {
         if (empty($conf)) {
             return [];
@@ -973,7 +1018,8 @@ class ReferenceIndex
             if (ExtensionManagementUtility::isLoaded('workspaces')
                 && $workspaceUid > 0
                 && !empty($conf['MM'] ?? '')
-                && !empty($conf['allowed'] ?? '')
+                // Catch type=group 'allowed' and type=select 'foreign_table' MM scenarios
+                && (!empty($conf['allowed'] ?? '') || !empty($conf['foreign_table'] ?? ''))
                 && empty($conf['MM_opposite_field'] ?? '')
                 && (int)($row['t3ver_wsid'] ?? 0) === 0
             ) {

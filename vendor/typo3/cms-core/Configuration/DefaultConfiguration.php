@@ -1,4 +1,5 @@
 <?php
+
 /*
  * This file is part of the TYPO3 CMS project.
  *
@@ -82,6 +83,7 @@ return [
         'fileCreateMask' => '0664',
         'folderCreateMask' => '2775',
         'features' => [
+            'extbase.consistentDateTimeHandling' => false,
             'frontend.cache.autoTagging' => false,
             'redirects.hitCount' => false,
             'security.backend.htmlSanitizeRte' => false,
@@ -90,6 +92,11 @@ return [
             'security.frontend.reportContentSecurityPolicy' => false,
             'security.frontend.allowInsecureSiteResolutionByQueryParameters' => false,
             'security.frontend.allowInsecureFrameOptionInShowImageController' => false,
+            // only file extensions configured in 'textfile_ext', 'mediafile_ext', 'miscfile_ext' are accepted
+            'security.system.enforceAllowedFileExtensions' => false,
+            // only files having file-extension to mime-type matches are allowed
+            // (adjustable by `$GLOBALS['TYPO3_CONF_VARS']['SYS']['FileInfo']['mimeTypeCompatibility']`)
+            'security.system.enforceFileExtensionMimeTypeConsistency' => true,
         ],
         'createGroup' => '',
         'sitename' => 'TYPO3',
@@ -100,8 +107,9 @@ return [
         'hhmm' => 'H:i',
         'loginCopyrightWarrantyProvider' => '',
         'loginCopyrightWarrantyURL' => '',
-        'textfile_ext' => 'txt,ts,typoscript,html,htm,css,tmpl,js,sql,xml,csv,xlf,yaml,yml',
+        'textfile_ext' => 'css,csv,htm,html,js,json,md,rst,rtf,sql,srt,tmpl,ts,txt,typoscript,xlf,xml,yaml,yml',
         'mediafile_ext' => 'gif,jpg,jpeg,bmp,png,webp,pdf,svg,ai,mp3,wav,mp4,ogg,flac,opus,webm,youtube,vimeo',
+        'miscfile_ext' => '7z,doc,docm,docx,dot,dotm,dotx,epub,gz,ics,mobi,odp,ods,odt,potm,potx,ppam,pps,ppsm,ppsx,ppt,pptm,pptx,rar,sldm,sldx,tar,vcard,vcf,xlam,xls,xlsb,xlsm,xlsx,xlt,xltm,xltx,zip',
         'binPath' => '',
         'binSetup' => '',
         'setMemoryLimit' => 0,
@@ -354,15 +362,124 @@ return [
             ],
         ],
         'FileInfo' => [
-            // Static mapping for file extensions to mime types.
-            // In special cases the mime type is not detected correctly.
-            // Use this array only if the automatic detection does not work correct!
-            'fileExtensionToMimeType' => [
-                'avif' => 'image/avif',
-                'svg' => 'image/svg+xml',
-                'youtube' => 'video/youtube',
-                'vimeo' => 'video/vimeo',
+            // List of extensions/mimetypes that are detected as a more generic mimetype
+            // by finfo_file()/mime_content_type(), but are allowed to be
+            // mapped to a concrete MIME type by their file extension
+            // (but only if the file was detected as the generalized mime type!)
+            'mimeTypeCompatibility' => [
+                // mime-db/db.json only knows: "application/octet-stream", "application/x-msdos-program", "application/x-msdownload"
+                // So we map all other possible .exe types to this.
+                'application/x-dosexec' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/x-mz-executable' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/x-wine-extension-mz' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/x-executable' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/binary' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/x-ms-application' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/dos-exe' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/x-ms-dos-executable' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/vnd.microsoft.portable-executable' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                'application/x-winexe' => [
+                    'exe' => 'application/x-msdos-program',
+                ],
+                // Encrypted Office Open XML documents
+                'application/encrypted' => [
+                    'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                    'sldx' => 'application/vnd.openxmlformats-officedocument.presentationml.slide',
+                    'ppsx' => 'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
+                    'potx' => 'application/vnd.openxmlformats-officedocument.presentationml.template',
+                    'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'xltx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
+                    'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'dotx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.template',
+                ],
+                // Word
+                // https://support.microsoft.com/en-us/office/open-xml-formats-and-file-name-extensions-5200d93c-3449-4380-8e11-31ef14555b18#ID0EDFBF
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => [
+                    // Macro-enabled document
+                    'docm' => 'application/vnd.ms-word.document.macroenabled.12',
+                    // Template
+                    'dotx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.template',
+                    // Macro-enabled template
+                    'dotm' => 'application/vnd.ms-word.template.macroenabled.12',
+                ],
+                // PowerPoint
+                // https://support.microsoft.com/en-us/office/open-xml-formats-and-file-name-extensions-5200d93c-3449-4380-8e11-31ef14555b18#ID0EDBBF
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation' => [
+                    // Macro-enabled presentation
+                    'pptm' => 'application/vnd.ms-powerpoint.presentation.macroenabled.12',
+                    // Template
+                    'potx' => 'application/vnd.openxmlformats-officedocument.presentationml.template',
+                    // Macro-enabled template
+                    'potm' => 'application/vnd.ms-powerpoint.template.macroenabled.12',
+                    // Macro-enabled add-in
+                    'ppam' => 'application/vnd.ms-powerpoint.addin.macroenabled.12',
+                    // Show
+                    'ppsx' => 'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
+                    // Macro-enabled show
+                    'ppsm' => 'application/vnd.ms-powerpoint.slideshow.macroenabled.12',
+                    // Slide
+                    'sldx' => 'application/vnd.openxmlformats-officedocument.presentationml.slide',
+                    // Macro-enabled slide
+                    'sldm' => 'application/vnd.ms-powerpoint.slide.macroenabled.12',
+                    // Office theme
+                    'thmx' => 'application/vnd.ms-officetheme',
+                ],
+                // Excel
+                // https://support.microsoft.com/en-us/office/open-xml-formats-and-file-name-extensions-5200d93c-3449-4380-8e11-31ef14555b18#ID0EDDBF
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => [
+                    // Macro-enabled workbook
+                    'xlsm' => 'application/vnd.ms-excel.sheet.macroenabled.12',
+                    // Template
+                    'xltx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
+                    // Macro-enabled template
+                    'xltm' => 'application/vnd.ms-excel.template.macroenabled.12',
+                    // Non-XML binary workbook
+                    'xlsb' => 'application/vnd.ms-excel.sheet.binary.macroenabled.12',
+                    // Macro-enabled add-in
+                    'xlam' => 'application/vnd.ms-excel.addin.macroenabled.12',
+                ],
+                'font/sfnt' => [
+                    'otf' => 'font/otf',
+                    'ttf' => 'font/ttf',
+                ],
+                'image/jpeg' => [
+                    'jfif' => 'image/pjpeg',
+                ],
+                'text/plain' => [
+                    'json' => 'application/json',
+                    'srt' => 'application/x-subrip',
+                    'vimeo' => 'video/vimeo',
+                    'yaml' => 'application/yaml',
+                    'yml' => 'application/yaml',
+                    'youtube' => 'video/youtube',
+                ],
+                'text/xml' => [
+                    'opml' => 'text/x-opml',
+                ],
             ],
+            // Former static mapping for file extensions to mime types,
+            // for special cases the mime type is not detected correctly.
+            // This array was used if the automatic detection does not work correct!
+            // Please use 'mimeTypeCompatibility' instead.
+            'fileExtensionToMimeType' => [],
         ],
         'fluid' => [
             'interceptors' => [],
@@ -715,6 +832,11 @@ return [
                     \TYPO3\CMS\Backend\Form\FormDataProvider\EvaluateDisplayConditions::class => [
                         'depends' => [
                             \TYPO3\CMS\Backend\Form\FormDataProvider\TcaRecordTitle::class,
+                        ],
+                    ],
+                    \TYPO3\CMS\Backend\Form\FormDataProvider\SystemMaintainerAsReadonly::class => [
+                        'depends' => [
+                            \TYPO3\CMS\Backend\Form\FormDataProvider\EvaluateDisplayConditions::class,
                         ],
                     ],
                 ],
@@ -1321,7 +1443,7 @@ return [
         // Backend Configuration.
         'entryPoint' => '/typo3',
         'fileadminDir' => 'fileadmin/',
-        'lockRootPath' => '',
+        'lockRootPath' => [],
         'lockBackendFile' => '',
         'userHomePath' => '',
         'groupHomePath' => '',
@@ -1439,6 +1561,7 @@ return [
                 '_gl',
                 // Google ads
                 'gad',
+                'gad_campaignid',
                 'gad_source',
                 'gbraid',
                 'gclid',
@@ -1471,6 +1594,8 @@ return [
                 'hsCtaTracking',
                 // HubSpot Form Tracking Parameters
                 'submissionGuid',
+                // LinkedIn First-Party Ad Tracking ID
+                'li_fat_id',
             ],
             'requireCacheHashPresenceParameters' => [],
             'excludeAllEmptyParameters' => false,

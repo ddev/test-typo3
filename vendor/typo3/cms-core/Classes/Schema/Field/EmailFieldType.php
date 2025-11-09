@@ -26,4 +26,9 @@ final readonly class EmailFieldType extends AbstractFieldType
     {
         return 'email';
     }
+
+    public function isSearchable(): true
+    {
+        return true;
+    }
 }

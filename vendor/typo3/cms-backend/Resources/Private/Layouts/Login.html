@@ -5,12 +5,8 @@
     data-namespace-typo3-fluid="true"
 >
 
-<f:be.pageRenderer
-    includeJavaScriptModules="{
-        0: 'bootstrap',
-        1: '@typo3/backend/login.js'
-    }"
-/>
+<f:asset.module identifier="bootstrap"/>
+<f:asset.module identifier="@typo3/backend/login.js"/>
 
 <div class="typo3-login">
     <div class="typo3-login-inner">
@@ -45,7 +41,6 @@
                                     <form action="{formActionUrl}" method="post" name="loginform" id="typo3-login-form" spellcheck="false">
                                         <input type="hidden" name="login_status" value="login" />
                                         <input type="hidden" name="userident" id="t3-field-userident" class="t3js-login-userident-field" value="" />
-                                        <input type="hidden" name="redirect_url" value="{redirectUrl}" />
                                         <input type="hidden" name="loginRefresh" value="{loginRefresh}" />
                                         <input type="hidden" name="{requestTokenName}" value="{requestTokenValue}" />
 

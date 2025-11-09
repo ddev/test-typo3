@@ -41,6 +41,7 @@ use TYPO3\CMS\Install\Service\Event\ModifyLanguagePacksEvent;
  */
 class LanguagePackService
 {
+    private const LANGUAGE_PACK_URL = 'https://localize.typo3.org/xliff/';
     /**
      * @var Locales
      */
@@ -50,8 +51,6 @@ class LanguagePackService
      * @var Registry
      */
     protected $registry;
-
-    private const LANGUAGE_PACK_URL = 'https://localize.typo3.org/xliff/';
 
     public function __construct(
         protected readonly EventDispatcherInterface $eventDispatcher,
@@ -126,7 +125,7 @@ class LanguagePackService
             $path = $package->getPackagePath();
             $finder = new Finder();
             try {
-                $files = $finder->files()->in($path . 'Resources/Private/Language/')->name('*.xlf');
+                $files = $finder->files()->ignoreUnreadableDirs()->in($path . 'Resources/Private/Language/')->name('*.xlf');
                 if ($files->count() === 0) {
                     // This extension has no .xlf files
                     continue;
@@ -309,6 +308,5 @@ class LanguagePackService
         if ($zipService->verify($file)) {
             $zipService->extract($file, $path);
         }
-        GeneralUtility::fixPermissions($path, true);
     }
 }

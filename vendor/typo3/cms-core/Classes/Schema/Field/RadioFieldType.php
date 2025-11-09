@@ -26,4 +26,19 @@ final readonly class RadioFieldType extends AbstractFieldType
     {
         return 'radio';
     }
+
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
+    public function isNullable(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
+    }
 }

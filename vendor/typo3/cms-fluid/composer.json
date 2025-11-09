@@ -19,10 +19,10 @@
 		"sort-packages": true
 	},
 	"require": {
-		"symfony/dependency-injection": "^7.1.4",
-		"typo3/cms-core": "13.4.3",
-		"typo3/cms-extbase": "13.4.3",
-		"typo3fluid/fluid": "^4.0.2"
+		"symfony/dependency-injection": "^7.2",
+		"typo3/cms-core": "13.4.19",
+		"typo3/cms-extbase": "13.4.19",
+		"typo3fluid/fluid": "^4.4.3"
 	},
 	"conflict": {
 		"typo3/cms": "*"

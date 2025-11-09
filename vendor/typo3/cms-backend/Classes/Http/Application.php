@@ -24,6 +24,7 @@ use TYPO3\CMS\Core\Context\Context;
 use TYPO3\CMS\Core\Context\DateTimeAspect;
 use TYPO3\CMS\Core\Context\VisibilityAspect;
 use TYPO3\CMS\Core\Core\SystemEnvironmentBuilder;
+use TYPO3\CMS\Core\Domain\DateTimeFactory;
 use TYPO3\CMS\Core\Http\AbstractApplication;
 
 /**
@@ -56,12 +57,7 @@ class Application extends AbstractApplication
      */
     protected function initializeContext(): void
     {
-        $this->context->setAspect(
-            'date',
-            new DateTimeAspect(
-                (new \DateTimeImmutable())->setTimestamp($GLOBALS['EXEC_TIME'])
-            )
-        );
+        $this->context->setAspect('date', new DateTimeAspect(DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME'])));
         $this->context->setAspect('visibility', new VisibilityAspect(true, true, false, true));
     }
 }

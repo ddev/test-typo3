@@ -12,16 +12,29 @@ namespace TYPO3Fluid\Fluid\Core\Parser;
 use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\NodeInterface;
 use TYPO3Fluid\Fluid\Core\Rendering\RenderingContextInterface;
 use TYPO3Fluid\Fluid\Core\Variables\VariableProviderInterface;
+use TYPO3Fluid\Fluid\Core\ViewHelper\ArgumentDefinition;
 
 /**
  * This interface is returned by \TYPO3Fluid\Fluid\Core\Parser\TemplateParser->parse()
  * method and is a parsed template
+ *
+ * @internal This interface should be used for type-checks only.
  */
 interface ParsedTemplateInterface
 {
     public function setIdentifier(string $identifier);
 
     public function getIdentifier(): string;
+
+    /**
+     * @return ArgumentDefinition[]
+     */
+    public function getArgumentDefinitions(): array;
+
+    /**
+     * @return string[]
+     */
+    public function getAvailableSlots(): array;
 
     /**
      * Render the parsed template with rendering context
@@ -39,6 +52,8 @@ interface ParsedTemplateInterface
      * Returns the name of the layout that is defined within the current template via <f:layout name="..." />
      * If no layout is defined, this returns null.
      * This requires the current rendering context in order to be able to evaluate the layout name
+     *
+     * @todo remove NodeInterface from return types in Fluid v5
      */
     public function getLayoutName(RenderingContextInterface $renderingContext): string|null|NodeInterface;
 

@@ -1,4 +1,5 @@
 <?php
+
 /**
  * An array consisting of implementations of middlewares for a middleware stack to be registered
  *
@@ -153,7 +154,7 @@ return [
             ],
         ],
         /** internal: do not use or reference this middleware in your own code */
-        'typo3/cms-core/cache-timout' => [
+        'typo3/cms-core/cache-timeout' => [
             'target' => \TYPO3\CMS\Frontend\Middleware\CacheTimeout::class,
             'after' => [
                 'typo3/cms-core/cache-tags-attribute',

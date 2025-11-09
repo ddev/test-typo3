@@ -17,4 +17,25 @@ declare(strict_types=1);
 
 namespace TYPO3\CMS\Core\Site\Set;
 
-class InvalidSetException extends \RuntimeException {}
+/**
+ * @internal Only to be used by internal site settings functionality
+ */
+class InvalidSetException extends \RuntimeException
+{
+    private readonly string $setName;
+
+    public function __construct(
+        string $message = '',
+        int $code = 0,
+        ?\Throwable $previous = null,
+        string $setName = '',
+    ) {
+        parent::__construct($message, $code, $previous);
+        $this->setName = $setName;
+    }
+
+    public function getSetName(): string
+    {
+        return $this->setName;
+    }
+}

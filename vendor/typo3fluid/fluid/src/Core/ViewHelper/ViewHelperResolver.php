@@ -28,23 +28,104 @@ class ViewHelperResolver
     protected array $resolvedViewHelperClassNames = [];
 
     /**
-     * Namespaces requested by the template being rendered,
-     * in [shortname => phpnamespace] format.
+     * Runtime cache for ViewHelperResolver delegate objects that
+     * are responsible for a namespace string.
+     * This will be migrated to the namespace array with Fluid v5.
      *
-     * @var array<string, string[]|null>
+     * @var array<class-string, ViewHelperResolverDelegateInterface>
+     */
+    protected array $resolverDelegates = [];
+
+    /**
+     * Available global namespaces in the current rendering context.
+     * Each namespace identifier (like "f") can refer to one or
+     * multiple PHP namespaces, specified as an array of class-strings,
+     * which will be tested in reverse order:
+     *
+     * Example:
+     *
+     *     [
+     *         'vendor' => ['Vendor\\A\\ViewHelpers', 'Vendor\\B\\ViewHelpers']
+     *     ]
+     *
+     * A namespace can also be set to "null", which removes
+     * all previously defined PHP namespaces and allows the
+     * namespace to be used within templates as-is without any Fluid
+     * parsing.
+     *
+     * Example:
+     *
+     *     [
+     *         'vendor' => null
+     *     ]
+     *
+     * A namespace identifier can also include one or multiple
+     * "*" wildcard placeholders, which disables Fluid parsing
+     * for the matching namespaces.
+     *
+     * Example:
+     *
+     *     [
+     *         'ven*' => null
+     *     ]
+     *
+     * @var array<string, (string|null)[]|null>
      */
     protected array $namespaces = [
         'f' => ['TYPO3Fluid\\Fluid\\ViewHelpers'],
     ];
 
+    /**
+     * Available local namespaces in the current rendering context
+     * Local namespaces are defined in a template file by using either
+     * the {namespace x=Vendor\MyPackage\ViewHelpers} syntax or the
+     * xmlns equivalent.
+     * Local namespaces are only considered in the current file
+     * (template, layout or partial) and don't inherit to any children.
+     *
+     * @see $namespaces
+     * @var array<string, (string|null)[]|null>
+     */
+    protected array $localNamespaces = [];
+
+    /**
+     * Namespaces that have neither been defined globally nor locally
+     * in the current template file, but in one of its parents. This
+     * collection only exists to provide backwards-compatibility in
+     * Fluid v4 while still being able to emit deprecation notices.
+     *
+     * @todo remove this with Fluid v5
+     * @see $namespaces
+     * @var array<string, (string|null)[]|null>
+     */
+    protected array $inheritedNamespaces = [];
+
+    /**
+     * Returns all currently registered namespaces. Note that this includes both
+     * global namespaces and local namespaces added from within the current template.
+     *
+     * @return array<string, (string|null)[]|null>
+     */
     public function getNamespaces(): array
     {
-        return $this->namespaces;
+        $mergedNamespaces = $this->namespaces;
+        foreach ($this->localNamespaces as $identifier => $phpNamespace) {
+            if (!array_key_exists($identifier, $mergedNamespaces) || $mergedNamespaces[$identifier] === null) {
+                $mergedNamespaces[$identifier] = $phpNamespace === null ? null : (array)$phpNamespace;
+            } elseif (is_array($phpNamespace)) {
+                $mergedNamespaces[$identifier] = array_unique(array_merge($mergedNamespaces[$identifier], $phpNamespace));
+            } elseif (isset($mergedNamespaces[$identifier]) && !in_array($phpNamespace, $mergedNamespaces[$identifier])) {
+                $mergedNamespaces[$identifier][] = $phpNamespace;
+            }
+        }
+        return $mergedNamespaces;
     }
 
     /**
      * Add a PHP namespace where ViewHelpers can be found and give
-     * it an alias/identifier.
+     * it an alias/identifier. The namespace will be registered
+     * globally and can be used in the template and all associated
+     * subtemplates (layout, partials).
      *
      * The provided namespace can be either a single namespace or
      * an array of namespaces, as strings. The identifier/alias is
@@ -74,9 +155,18 @@ class ViewHelperResolver
      * you need to remove or replace previously added namespaces. Be aware
      * that setNamespaces() also removes the default "f" namespace, so
      * when you use this method you should always include the "f" namespace.
+     *
+     * @todo reduce input variants with Fluid v5, ideally only resolver delegates
+     * @param string|string[]|ViewHelperResolverDelegateInterface|null $phpNamespace
      */
-    public function addNamespace(string $identifier, string|array|null $phpNamespace): void
+    public function addNamespace(string $identifier, string|array|null|ViewHelperResolverDelegateInterface $phpNamespace): void
     {
+        // For now we just convert delegate instances back to string to stay consistent
+        if ($phpNamespace instanceof ViewHelperResolverDelegateInterface) {
+            $this->resolverDelegates[$phpNamespace->getNamespace()] = $phpNamespace;
+            $phpNamespace = $phpNamespace->getNamespace();
+        }
+
         if (!array_key_exists($identifier, $this->namespaces) || $this->namespaces[$identifier] === null) {
             $this->namespaces[$identifier] = $phpNamespace === null ? null : (array)$phpNamespace;
         } elseif (is_array($phpNamespace)) {
@@ -91,9 +181,13 @@ class ViewHelperResolver
      * clearing the already added namespaces. Utility method mainly
      * used in compiled templates, where some namespaces can be added
      * from outside and some can be added from compiled values.
+     *
+     * @internal Only to be used by compiled templates
+     * @deprecated Will be removed in v5. Method is not in use anymore.
      */
     public function addNamespaces(array $namespaces): void
     {
+        trigger_error('addNamespaces() has been deprecated and will be removed in Fluid v5.', E_USER_DEPRECATED);
         foreach ($namespaces as $identifier => $namespace) {
             $this->addNamespace($identifier, $namespace);
         }
@@ -109,9 +203,11 @@ class ViewHelperResolver
      *
      * @param string $fluidNamespace
      * @return string
+     * @deprecated Will be removed in v5. Method is not in use anymore.
      */
     public function resolvePhpNamespaceFromFluidNamespace(string $fluidNamespace): string
     {
+        trigger_error('resolvePhpNamespaceFromFluidNamespace() has been deprecated and will be removed in Fluid v5.', E_USER_DEPRECATED);
         $namespace = $fluidNamespace;
         $suffixLength = strlen(Patterns::NAMESPACESUFFIX);
         $phpNamespaceSuffix = str_replace('/', '\\', Patterns::NAMESPACESUFFIX);
@@ -128,7 +224,7 @@ class ViewHelperResolver
     }
 
     /**
-     * Set all namespaces as an array of ['identifier' => ['Php\Namespace1', 'Php\Namespace2']]
+     * Set all global namespaces as an array of ['identifier' => ['Php\Namespace1', 'Php\Namespace2']]
      * namespace definitions. For convenience and legacy support, a
      * format of ['identifier' => 'Only\Php\Namespace'] is allowed,
      * but will internally convert the namespace to an array and
@@ -140,13 +236,99 @@ class ViewHelperResolver
      * belonged to "f" as a new alias and use that in your templates.
      *
      * Use getNamespaces() to get an array of currently added namespaces.
+     *
+     * @todo reduce input variants with Fluid v5, ideally only resolver delegates
+     * @param array<string, string|ViewHelperResolverDelegateInterface|(string|ViewHelperResolverDelegateInterface)[]|null> $namespaces
      */
     public function setNamespaces(array $namespaces): void
     {
         $this->namespaces = [];
-        foreach ($namespaces as $identifier => $phpNamespace) {
-            $this->namespaces[$identifier] = $phpNamespace === null ? null : (array)$phpNamespace;
+        foreach ($namespaces as $identifier => $phpNamespaces) {
+            if ($phpNamespaces === null) {
+                $this->namespaces[$identifier] = null;
+            } elseif ($phpNamespaces instanceof ViewHelperResolverDelegateInterface) {
+                $this->resolverDelegates[$phpNamespaces->getNamespace()] = $phpNamespaces;
+                $this->namespaces[$identifier] = [$phpNamespaces->getNamespace()];
+            } else {
+                $this->namespaces[$identifier] = array_map(
+                    // For now, we don't enforce types here because this might be a breaking change
+                    function ($phpNamespace) {
+                        // For now we just convert delegate instances back to string to stay consistent
+                        if ($phpNamespace instanceof ViewHelperResolverDelegateInterface) {
+                            $this->resolverDelegates[$phpNamespace->getNamespace()] = $phpNamespace;
+                            return $phpNamespace->getNamespace();
+                        }
+                        return $phpNamespace;
+                    },
+                    (array)$phpNamespaces,
+                );
+            }
         }
+    }
+
+    /**
+     * @internal
+     */
+    public function addLocalNamespace(string $identifier, ?string $phpNamespace): void
+    {
+        if ($phpNamespace === null) {
+            $this->localNamespaces[$identifier] = null;
+        } else {
+            $this->localNamespaces[$identifier] ??= [];
+            $this->localNamespaces[$identifier][] = $phpNamespace;
+        }
+    }
+
+    /**
+     * @param array<string, (string|null)[]|null> $namespaces
+     * @internal
+     */
+    public function setLocalNamespaces(array $namespaces): void
+    {
+        $this->localNamespaces = $namespaces;
+    }
+
+    /**
+     * @return array<string, (string|null)[]>
+     * @internal
+     */
+    public function getLocalNamespaces(): array
+    {
+        return $this->localNamespaces;
+    }
+
+    /**
+     * @param array<string, (string|null)[]|null> $namespaces
+     * @internal
+     * @todo remove this with Fluid v5
+     */
+    protected function addInheritedNamespaces(array $namespaces): void
+    {
+        foreach ($namespaces as $identifier => $phpNamespaces) {
+            if ($phpNamespaces === null) {
+                $this->inheritedNamespaces[$identifier] = null;
+            } else {
+                $this->inheritedNamespaces[$identifier] = array_unique(array_merge(
+                    $this->inheritedNamespaces[$identifier] ?? [],
+                    $phpNamespaces,
+                ));
+            }
+        }
+    }
+
+    /**
+     * Creates a copy of the ViewHelperResolver that still contains all globally
+     * registered ViewHelper namespaces, but no local namespaces.
+     *
+     * @internal
+     */
+    public function getScopedCopy(): ViewHelperResolver
+    {
+        $copy = clone $this;
+        // @todo remove this with Fluid v5
+        $copy->addInheritedNamespaces($copy->getLocalNamespaces());
+        $copy->setLocalNamespaces([]);
+        return $copy;
     }
 
     /**
@@ -158,11 +340,19 @@ class ViewHelperResolver
      */
     public function isNamespaceValid(string $namespaceIdentifier): bool
     {
-        if (!array_key_exists($namespaceIdentifier, $this->namespaces)) {
-            return false;
+        $namespaces = $this->getNamespaces();
+        if (isset($namespaces[$namespaceIdentifier])) {
+            return true;
         }
 
-        return $this->namespaces[$namespaceIdentifier] !== null;
+        // Check ViewHelper namespaces that were inherited from parent templates
+        // as a fallback
+        // @todo remove with Fluid v5
+        if (isset($this->inheritedNamespaces[$namespaceIdentifier])) {
+            throw new InheritedNamespaceException();
+        }
+
+        return false;
     }
 
     /**
@@ -171,14 +361,16 @@ class ViewHelperResolver
      *
      * @param string $namespaceIdentifier
      * @return bool true if the given namespace is valid
+     * @deprecated Will be removed in v5. Use combination of isNamespaceIgnored() and isNamespaceValid() instead.
      */
     public function isNamespaceValidOrIgnored(string $namespaceIdentifier): bool
     {
+        trigger_error('isNamespaceValidOrIgnored() has been deprecated and will be removed in Fluid v5.', E_USER_DEPRECATED);
         if ($this->isNamespaceValid($namespaceIdentifier) === true) {
             return true;
         }
 
-        if (array_key_exists($namespaceIdentifier, $this->namespaces)) {
+        if (array_key_exists($namespaceIdentifier, $this->getNamespaces())) {
             return true;
         }
 
@@ -195,10 +387,11 @@ class ViewHelperResolver
      */
     public function isNamespaceIgnored(string $namespaceIdentifier): bool
     {
-        if (array_key_exists($namespaceIdentifier, $this->namespaces)) {
-            return $this->namespaces[$namespaceIdentifier] === null;
+        $namespaces = $this->getNamespaces();
+        if (array_key_exists($namespaceIdentifier, $namespaces)) {
+            return $namespaces[$namespaceIdentifier] === null;
         }
-        foreach (array_keys($this->namespaces) as $existingNamespaceIdentifier) {
+        foreach (array_keys($namespaces) as $existingNamespaceIdentifier) {
             if (strpos($existingNamespaceIdentifier, '*') === false) {
                 continue;
             }
@@ -226,21 +419,63 @@ class ViewHelperResolver
      */
     public function resolveViewHelperClassName(string $namespaceIdentifier, string $methodIdentifier): string
     {
+        // @todo consider moving caching responsibility to delegates in Fluid v5
         if (!isset($this->resolvedViewHelperClassNames[$namespaceIdentifier][$methodIdentifier])) {
-            $resolvedViewHelperClassName = $this->resolveViewHelperName($namespaceIdentifier, $methodIdentifier);
-            $actualViewHelperClassName = implode('\\', array_map('ucfirst', explode('.', $resolvedViewHelperClassName)));
-            if (false === class_exists($actualViewHelperClassName) || $actualViewHelperClassName === false) {
+            try {
+                $resolvedViewHelperClassName = $this->resolveViewHelperName($namespaceIdentifier, $methodIdentifier);
+            } catch (UnresolvableViewHelperException $e) {
                 throw new ParserException(sprintf(
-                    'The ViewHelper "<%s:%s>" could not be resolved.' . chr(10) .
-                    'Based on your spelling, the system would load the class "%s", however this class does not exist.',
+                    'The ViewHelper "<%s:%s>" could not be resolved.' . chr(10) . '%s',
                     $namespaceIdentifier,
                     $methodIdentifier,
-                    $resolvedViewHelperClassName,
-                ), 1407060572);
+                    $e->getMessage(),
+                ), 1407060572, $e);
             }
-            $this->resolvedViewHelperClassNames[$namespaceIdentifier][$methodIdentifier] = $actualViewHelperClassName;
+            $this->resolvedViewHelperClassNames[$namespaceIdentifier][$methodIdentifier] = $resolvedViewHelperClassName;
         }
         return $this->resolvedViewHelperClassNames[$namespaceIdentifier][$methodIdentifier];
+    }
+
+    /**
+     * Returns the responsible delegate for a ViewHelper
+     *
+     * @internal will probably change with Fluid v5 when internal namespace handling is consolidated. Currently, this
+     *           might lead to duplicate code execution at parse time, but this is not relevant for cached templates.
+     */
+    public function getResponsibleDelegate(string $namespaceIdentifier, string $methodIdentifier): ?ViewHelperResolverDelegateInterface
+    {
+        if (isset($this->getNamespaces()[$namespaceIdentifier])) {
+            foreach (array_reverse($this->getNamespaces()[$namespaceIdentifier]) as $namespace) {
+                // null values within array can safely be skipped. Only if the whole definition is null,
+                // the whole namespace is ignored by Fluid
+                if ($namespace === null) {
+                    continue;
+                }
+                $this->resolverDelegates[$namespace] ??= $this->createResolverDelegateInstanceFromClassName($namespace);
+                try {
+                    $this->resolverDelegates[$namespace]->resolveViewHelperClassName($methodIdentifier);
+                    return $this->resolverDelegates[$namespace];
+                } catch (UnresolvableViewHelperException $e) {
+                }
+            }
+        }
+        // @todo remove this with Fluid v5
+        if (isset($this->inheritedNamespaces[$namespaceIdentifier])) {
+            foreach (array_reverse($this->inheritedNamespaces[$namespaceIdentifier]) as $namespace) {
+                // null values within array can safely be skipped. Only if the whole definition is null,
+                // the whole namespace is ignored by Fluid
+                if ($namespace === null) {
+                    continue;
+                }
+                $this->resolverDelegates[$namespace] ??= $this->createResolverDelegateInstanceFromClassName($namespace);
+                try {
+                    $this->resolverDelegates[$namespace]->resolveViewHelperClassName($methodIdentifier);
+                    return $this->resolverDelegates[$namespace];
+                } catch (UnresolvableViewHelperException $e) {
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -266,6 +501,19 @@ class ViewHelperResolver
     }
 
     /**
+     * Creates a ViewHelperResolver delegate object based on a ViewHelper
+     * namespace string. This can be overridden by frameworks to implement
+     * dependency injection or custom fallback logic.
+     */
+    public function createResolverDelegateInstanceFromClassName(string $delegateClassName): ViewHelperResolverDelegateInterface
+    {
+        if (is_a($delegateClassName, ViewHelperResolverDelegateInterface::class, true)) {
+            return new $delegateClassName();
+        }
+        return new ViewHelperCollection($delegateClassName);
+    }
+
+    /**
      * Return an array of ArgumentDefinition instances which describe
      * the arguments that the ViewHelper supports. By default, the
      * arguments are simply fetched from the ViewHelper - but custom
@@ -288,20 +536,49 @@ class ViewHelperResolver
      */
     protected function resolveViewHelperName(string $namespaceIdentifier, string $methodIdentifier): string
     {
-        $explodedViewHelperName = explode('.', $methodIdentifier);
-        if (count($explodedViewHelperName) > 1) {
-            $className = implode('\\', array_map('ucfirst', $explodedViewHelperName));
-        } else {
-            $className = ucfirst($explodedViewHelperName[0]);
+        $lastException = null;
+        if (isset($this->getNamespaces()[$namespaceIdentifier])) {
+            foreach (array_reverse($this->getNamespaces()[$namespaceIdentifier]) as $namespace) {
+                // null values within array can safely be skipped. Only if the whole definition is null,
+                // the whole namespace is ignored by Fluid
+                if ($namespace === null) {
+                    continue;
+                }
+                $this->resolverDelegates[$namespace] ??= $this->createResolverDelegateInstanceFromClassName($namespace);
+                try {
+                    return $this->resolverDelegates[$namespace]->resolveViewHelperClassName($methodIdentifier);
+                } catch (UnresolvableViewHelperException $e) {
+                    $lastException = $e;
+                }
+            }
         }
-        $className .= 'ViewHelper';
 
-        $namespaces = (array)$this->namespaces[$namespaceIdentifier];
+        // Check ViewHelper namespaces that were inherited from parent templates
+        // as a fallback
+        // @todo remove this with Fluid v5
+        if (isset($this->inheritedNamespaces[$namespaceIdentifier])) {
+            foreach (array_reverse($this->inheritedNamespaces[$namespaceIdentifier]) as $namespace) {
+                // null values within array can safely be skipped. Only if the whole definition is null,
+                // the whole namespace is ignored by Fluid
+                if ($namespace === null) {
+                    continue;
+                }
+                $this->resolverDelegates[$namespace] ??= $this->createResolverDelegateInstanceFromClassName($namespace);
+                try {
+                    return $this->resolverDelegates[$namespace]->resolveViewHelperClassName($methodIdentifier);
+                } catch (UnresolvableViewHelperException $e) {
+                    // Only use exception of fallback chain if the regular chain didn't result in any exception
+                    $lastException ??= $e;
+                }
+            }
+        }
 
-        do {
-            $name = rtrim((string)array_pop($namespaces), '\\') . '\\' . $className;
-        } while (!class_exists($name) && count($namespaces));
-
-        return $name;
+        if ($lastException === null) {
+            $lastException = new UnresolvableViewHelperException(
+                'No suitable resolvers were registered for this namespace.',
+                1747658963,
+            );
+        }
+        throw $lastException;
     }
 }

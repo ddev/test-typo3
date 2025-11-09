@@ -23,6 +23,7 @@ use Doctrine\DBAL\Schema\Index;
 use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\SchemaException;
 use Doctrine\DBAL\Schema\Table;
+use TYPO3\CMS\Core\Cache\Frontend\FrontendInterface;
 use TYPO3\CMS\Core\Core\Bootstrap;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Database\Schema\Exception\StatementException;
@@ -40,6 +41,7 @@ class SchemaMigrator
         private readonly ConnectionPool $connectionPool,
         private readonly Parser $parser,
         private readonly DefaultTcaSchema $defaultTcaSchema,
+        private readonly FrontendInterface $runtime,
     ) {}
 
     /**
@@ -123,7 +125,7 @@ class SchemaMigrator
                 try {
                     $connection->executeStatement($statement);
                 } catch (DBALException $e) {
-                    $result[$hash] = $e->getPrevious()->getMessage();
+                    $result[$hash] = $e->getMessage();
                 }
             }
         }
@@ -192,7 +194,7 @@ class SchemaMigrator
                     $connection->executeStatement($statement);
                     $result[$statement] = '';
                 } catch (DBALException $e) {
-                    $result[$statement] = $e->getPrevious()->getMessage();
+                    $result[$statement] = $e->getMessage();
                 }
             }
         }
@@ -474,5 +476,6 @@ class SchemaMigrator
     protected function flushDatabaseSchemaCache(): void
     {
         Bootstrap::createCache('database_schema')->flush();
+        $this->runtime->flush();
     }
 }

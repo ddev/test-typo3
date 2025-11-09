@@ -27,6 +27,11 @@ final readonly class SlugFieldType extends AbstractFieldType
         return 'slug';
     }
 
+    public function isSearchable(): true
+    {
+        return true;
+    }
+
     public function getGeneratorOption(string $optionName): array|string|bool|null
     {
         return $this->configuration['generatorOptions'][$optionName] ?? null;
@@ -35,5 +40,24 @@ final readonly class SlugFieldType extends AbstractFieldType
     public function getGeneratorOptions(): array
     {
         return is_array($this->configuration['generatorOptions']) ? $this->configuration['generatorOptions'] : [];
+    }
+
+    public function hasDefaultValue(): true
+    {
+        return true;
+    }
+    public function getDefaultValue(): string
+    {
+        return '';
+    }
+
+    public function isNullable(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
     }
 }

@@ -10,14 +10,4 @@
  *
  * The TYPO3 project - inspiring people to share!
  */
-var __decorate=function(e,t,r,o){var n,l=arguments.length,m=l<3?t:null===o?o=Object.getOwnPropertyDescriptor(t,r):o;if("object"==typeof Reflect&&"function"==typeof Reflect.decorate)m=Reflect.decorate(e,t,r,o);else for(var p=e.length-1;p>=0;p--)(n=e[p])&&(m=(l<3?n(m):l>3?n(t,r,m):n(t,r))||m);return l>3&&m&&Object.defineProperty(t,r,m),m};import{html}from"lit";import{customElement,property}from"lit/decorators.js";import{BaseElement}from"@typo3/backend/settings/type/base.js";export const componentName="typo3-backend-settings-type-number";let NumberTypeElement=class extends BaseElement{render(){return html`
-      <input
-        type="number"
-        id=${this.formid}
-        class="form-control"
-        step="0.01"
-        ?readonly=${this.readonly}
-        .value=${this.value}
-        @change=${e=>this.value=parseFloat(e.target.value)}
-      />
-    `}};__decorate([property({type:Number})],NumberTypeElement.prototype,"value",void 0),NumberTypeElement=__decorate([customElement(componentName)],NumberTypeElement);export{NumberTypeElement};
+import{html as f,nothing as s}from"lit";import{property as c,customElement as h}from"lit/decorators.js";import{live as d}from"lit/directives/live.js";import{BaseElement as y}from"@typo3/backend/settings/type/base.js";var a=function(o,e,t,r){var i=arguments.length,n=i<3?e:r===null?r=Object.getOwnPropertyDescriptor(e,t):r,m;if(typeof Reflect=="object"&&typeof Reflect.decorate=="function")n=Reflect.decorate(o,e,t,r);else for(var l=o.length-1;l>=0;l--)(m=o[l])&&(n=(i<3?m(n):i>3?m(e,t,n):m(e,t))||n);return i>3&&n&&Object.defineProperty(e,t,n),n};const u="typo3-backend-settings-type-number";let p=class extends y{handleChange(e){const t=e.target;t.reportValidity()&&(this.value=t.valueAsNumber)}render(){return f`<input type=number id=${this.formid} class=form-control ?readonly=${this.readonly} .value=${d(this.value)} required min=${this.options.min??s} max=${this.options.max??s} step=${this.options.step??"0.01"} @change=${this.handleChange}>`}};a([c({type:Number})],p.prototype,"value",void 0),p=a([h(u)],p);export{p as NumberTypeElement,u as componentName};

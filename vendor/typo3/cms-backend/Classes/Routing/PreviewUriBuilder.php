@@ -28,14 +28,20 @@ use TYPO3\CMS\Core\Context\VisibilityAspect;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Database\Query\Restriction\DeletedRestriction;
 use TYPO3\CMS\Core\Database\Query\Restriction\HiddenRestriction;
+use TYPO3\CMS\Core\Domain\DateTimeFactory;
+use TYPO3\CMS\Core\Domain\Repository\PageRepository;
 use TYPO3\CMS\Core\Exception\SiteNotFoundException;
 use TYPO3\CMS\Core\Page\PageRenderer;
 use TYPO3\CMS\Core\Routing\InvalidRouteArgumentsException;
 use TYPO3\CMS\Core\Routing\RouterInterface;
 use TYPO3\CMS\Core\Routing\UnableToLinkToPageException;
+use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
+use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 use TYPO3\CMS\Core\Site\SiteFinder;
 use TYPO3\CMS\Core\Type\Bitmask\Permission;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
+use TYPO3\CMS\Core\Utility\HttpUtility;
+use TYPO3\CMS\Core\Versioning\VersionState;
 
 /**
  * Generate links to Frontend URLs with a modified scope.
@@ -50,6 +56,8 @@ class PreviewUriBuilder
     public const OPTION_WINDOW_SCOPE_LOCAL = 'local';
     public const OPTION_WINDOW_SCOPE_GLOBAL = 'global';
 
+    protected array $record = [];
+    protected string $table = 'pages';
     protected int $pageId;
     protected int $languageId = 0;
     protected array $rootLine = [];
@@ -59,12 +67,54 @@ class PreviewUriBuilder
     protected Context $context;
 
     /**
-     * @param int $pageId Page ID to be previewed
-     * @return static
+     * @param int|array $page Page ID to be previewed
      */
-    public static function create(int $pageId): self
+    public static function create(int|array $page): self
     {
-        return GeneralUtility::makeInstance(static::class, $pageId);
+        $pageId = 0;
+        $schema = GeneralUtility::makeInstance(TcaSchemaFactory::class)->get('pages');
+        $laguageFieldName = $schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName();
+        $transOrigPointerFieldName = $schema->getCapability(TcaSchemaCapability::Language)->getTranslationOriginPointerField()->getName();
+        if (!is_array($page)) {
+            $pageId = $page;
+            if ($pageId > 0) {
+                // If a page ID is given, we fetch the record from the database
+                $page = BackendUtility::getRecord('pages', $pageId) ?? [];
+            } else {
+                // If no valid page ID is given, we use an empty array
+                $page = [];
+            }
+        }
+        if ($page !== []) {
+            if (($page[$transOrigPointerFieldName] ?? 0) > 0) {
+                // If the page is a translation, we need to use the parent page's ID
+                $pageId = (int)$page[$transOrigPointerFieldName];
+            } else {
+                // Otherwise, use the current page's ID
+                $pageId = (int)($page['uid'] ?? 0);
+            }
+        }
+        $obj = new self($pageId);
+        $obj->pageId = $pageId;
+        $obj->record = $page;
+        $obj->languageId = (int)($page[$laguageFieldName] ?? 0);
+        return $obj;
+    }
+
+    /**
+     * @internal Only to be used by TYPO3 core - for now
+     */
+    public static function createForRecordPreview(string $table, int|array $record, int $pageId): self
+    {
+        $recordId = is_int($record) ? $record : (int)($record['uid'] ?? 0);
+        $previewPageId = self::getPreviewPageId($table, $recordId, $pageId);
+        $obj = self::create($previewPageId);
+        $obj->table = $table;
+        $obj = $obj->withRootLine(BackendUtility::BEgetRootLine($previewPageId));
+        $obj = $obj->withSection($table === 'tt_content' ? '#c' . $recordId : '');
+        $obj = $obj->withAdditionalQueryParameters(self::getPreviewUrlParameters($previewPageId, $table, $record));
+
+        return $obj;
     }
 
     /**
@@ -74,10 +124,7 @@ class PreviewUriBuilder
     {
         $this->pageId = $pageId;
         $this->context = clone GeneralUtility::makeInstance(Context::class);
-        $this->context->setAspect(
-            'visibility',
-            GeneralUtility::makeInstance(VisibilityAspect::class, true, false, false, true)
-        );
+        $this->context->setAspect('visibility', new VisibilityAspect(true, false, false, true));
     }
 
     /**
@@ -164,6 +211,25 @@ class PreviewUriBuilder
         return $target;
     }
 
+    public function isPreviewable(): bool
+    {
+        if ($this->pageId === 0 || !isset($this->record['doktype'])) {
+            return false;
+        }
+        $isDeletePlaceholder = VersionState::tryFrom($this->record['t3ver_state'] ?? 0) === VersionState::DELETE_PLACEHOLDER;
+        if ($isDeletePlaceholder) {
+            return false;
+        }
+        // Custom records need to be configured via pages TSconfig to allow previews
+        if ($this->table !== 'pages' && $this->table !== 'tt_content') {
+            $previewConfiguration = BackendUtility::getPagesTSconfig($this->pageId)['TCEMAIN.']['preview.'][$this->table . '.'] ?? null;
+            if (!is_array($previewConfiguration)) {
+                return false;
+            }
+        }
+        return self::isPreviewableDoktype($this->pageId, (int)$this->record['doktype']);
+    }
+
     /**
      * Builds preview URI.
      */
@@ -184,6 +250,9 @@ class PreviewUriBuilder
 
             // If there hasn't been a custom preview URI set by an event listener, generate it.
             if ($event->getPreviewUri() === null) {
+                if (!$this->isPreviewable()) {
+                    return null;
+                }
                 $permissionClause = $GLOBALS['BE_USER']->getPagePermsClause(Permission::PAGE_SHOW);
                 $pageInfo = BackendUtility::readPageAccess($event->getPageId(), $permissionClause) ?: [];
                 // Check if the page (= its rootline) has a site attached, otherwise just keep the URI as is
@@ -194,7 +263,7 @@ class PreviewUriBuilder
                 $event->setAdditionalQueryParameters(
                     array_replace_recursive(
                         $event->getAdditionalQueryParameters(),
-                        $this->getAdditionalQueryParametersForAccessRestrictedPages($pageInfo, $event->getContext(), $event->getRootline())
+                        self::getAdditionalQueryParametersForAccessRestrictedPages($pageInfo, $event->getContext(), $event->getRootline())
                     )
                 );
 
@@ -305,6 +374,59 @@ class PreviewUriBuilder
         );
     }
 
+    /**
+     * Returns the preview page id, based on the given input, by checking
+     * preview configuration and alternatively looking up the rootline.
+     *
+     * @param string $table The table of the record to be previewed - might be empty for direct page preview ($pageId > 0)
+     * @param int $recordId The id of the record to be previewed - might be empty for direct page preview ($pageId > 0)
+     * @param int $pageId The page to preview the record on, also used to preview a page directly
+     * @internal Only to be used by TYPO3 core
+     */
+    public static function getPreviewPageId(string $table, int $recordId, int $pageId): int
+    {
+        if ($table === 'pages') {
+            $rootPageId = $recordId;
+            if ($rootPageId) {
+                $l10nPointer = GeneralUtility::makeInstance(TcaSchemaFactory::class)->get('pages')->getCapability(TcaSchemaCapability::Language)->getTranslationOriginPointerField()->getName();
+                $page = BackendUtility::getRecord('pages', $rootPageId, 'is_siteroot,' . $l10nPointer);
+                if ($page['is_siteroot'] && $page[$l10nPointer]) {
+                    $rootPageId = $page[$l10nPointer];
+                }
+            }
+        } else {
+            $rootPageId = max(0, $pageId);
+        }
+
+        $previewConfiguration = BackendUtility::getPagesTSconfig($rootPageId)['TCEMAIN.']['preview.'][$table . '.'] ?? [];
+
+        if (isset($previewConfiguration['previewPageId'])) {
+            return (int)$previewConfiguration['previewPageId'];
+        }
+
+        $rootPageData = null;
+        $rootLine = BackendUtility::BEgetRootLine($rootPageId);
+        $currentPage = (array)(reset($rootLine) ?: []);
+        if (VersionState::tryFrom($currentPage['t3ver_state'] ?? 0) !== VersionState::DELETE_PLACEHOLDER
+            && self::isPreviewableDoktype((int)($currentPage['uid'] ?? 0), (int)($currentPage['doktype'] ?? 0))
+        ) {
+            // try the current page
+            $previewPageId = $rootPageId;
+        } else {
+            // or search for the root page
+            foreach ($rootLine as $page) {
+                if ($page['is_siteroot'] ?? false) {
+                    $rootPageData = $page;
+                    break;
+                }
+            }
+            $previewPageId = isset($rootPageData)
+                ? (int)$rootPageData['uid']
+                : $rootPageId;
+        }
+        return $previewPageId;
+    }
+
     protected function buildAttributes(?array $options = null): ?array
     {
         $options = $this->enrichOptions($options);
@@ -386,8 +508,9 @@ class PreviewUriBuilder
 
     /**
      * Creates ADMCMD parameters for the "viewpage" extension / frontend
+     * @internal not part of TYPO3 Core API
      */
-    protected function getAdditionalQueryParametersForAccessRestrictedPages(array $pageInfo, Context $context, array $rootLine): array
+    public static function getAdditionalQueryParametersForAccessRestrictedPages(array $pageInfo, Context $context, array $rootLine): array
     {
         if ($pageInfo === []) {
             return [];
@@ -438,23 +561,99 @@ class PreviewUriBuilder
         if ($access['starttime'] > $GLOBALS['EXEC_TIME']) {
             // simulate access time to ensure PageRepository will find the page and in turn PageRouter will generate
             // a URL for it
-            $dateAspect = GeneralUtility::makeInstance(
-                DateTimeAspect::class,
-                (new \DateTimeImmutable())->setTimestamp($access['starttime'])
-            );
+            $dateAspect = new DateTimeAspect(DateTimeFactory::createFromTimestamp($access['starttime']));
             $context->setAspect('date', $dateAspect);
             $additionalQueryParameters['ADMCMD_simTime'] = $access['starttime'];
         }
         if ($access['endtime'] < $GLOBALS['EXEC_TIME'] && $access['endtime'] !== 0) {
             // Set access time to page's endtime subtracted one second to ensure PageRepository will find the page and
             // in turn PageRouter will generate a URL for it
-            $dateAspect = GeneralUtility::makeInstance(
-                DateTimeAspect::class,
-                (new \DateTimeImmutable())->setTimestamp($access['endtime'] - 1)
-            );
+            $dateAspect = new DateTimeAspect(DateTimeFactory::createFromTimestamp($access['endtime'] - 1));
             $context->setAspect('date', $dateAspect);
             $additionalQueryParameters['ADMCMD_simTime'] = ($access['endtime'] - 1);
         }
         return $additionalQueryParameters;
+    }
+
+    /**
+     * Returns the parameters for the preview URL by evaluating language overlays and preview configuration
+     */
+    protected static function getPreviewUrlParameters(int $previewPageId, string $table, int|array $record): string
+    {
+        if (is_array($record)) {
+            $recordId = (int)($record['uid'] ?? 0);
+        } else {
+            $recordId = $record;
+            $record = BackendUtility::getRecord($table, $record) ?? [];
+        }
+
+        $linkParameters = [];
+        $previewConfiguration = BackendUtility::getPagesTSconfig($previewPageId)['TCEMAIN.']['preview.'][$table . '.'] ?? [];
+
+        // language handling
+        $schema = GeneralUtility::makeInstance(TcaSchemaFactory::class)->get($table);
+        if ($schema->isLanguageAware()
+            && ($languageField = $schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName())
+            && !empty($record[$languageField])
+        ) {
+            $l10nPointer = $schema->getCapability(TcaSchemaCapability::Language)->getTranslationOriginPointerField()->getName();
+            if (!empty($record[$l10nPointer]) && ($previewConfiguration['useDefaultLanguageRecord'] ?? true) === false) {
+                $recordId = (int)$record[$l10nPointer];
+            } else {
+                $recordId = (int)$record['uid'];
+            }
+            $language = $record[$languageField];
+            if ($language > 0) {
+                $linkParameters['_language'] = $language;
+            }
+        }
+
+        // Always use live workspace record uid for the preview
+        if ($schema->isWorkspaceAware() && ($record['t3ver_oid'] ?? 0) > 0) {
+            $recordId = $record['t3ver_oid'];
+        }
+
+        // map record data to GET parameters
+        if (isset($previewConfiguration['fieldToParameterMap.'])) {
+            foreach ($previewConfiguration['fieldToParameterMap.'] as $field => $parameterName) {
+                $value = $record[$field] ?? '';
+                if ($field === 'uid') {
+                    $value = $recordId;
+                }
+                $linkParameters[$parameterName] = $value;
+            }
+        }
+
+        // add/override parameters by configuration
+        if (isset($previewConfiguration['additionalGetParameters.'])) {
+            $linkParameters = array_replace(
+                $linkParameters,
+                GeneralUtility::removeDotsFromTS($previewConfiguration['additionalGetParameters.'])
+            );
+        }
+
+        return HttpUtility::buildQueryString($linkParameters, '&');
+    }
+
+    /**
+     * Check whether the current page has a doktype, which can be previewed
+     */
+    protected static function isPreviewableDoktype(int $pageId, int $doktype): bool
+    {
+        if ($pageId <= 0 || $doktype <= 0) {
+            return false;
+        }
+
+        $TSconfig = BackendUtility::getPagesTSconfig($pageId)['TCEMAIN.']['preview.'] ?? [];
+        if (isset($TSconfig['disableButtonForDokType'])) {
+            $excludeDokTypes = GeneralUtility::intExplode(',', (string)$TSconfig['disableButtonForDokType'], true);
+        } else {
+            // Exclude sysfolders and spacers by default
+            $excludeDokTypes = [
+                PageRepository::DOKTYPE_SYSFOLDER,
+                PageRepository::DOKTYPE_SPACER,
+            ];
+        }
+        return !in_array($doktype, $excludeDokTypes, true);
     }
 }

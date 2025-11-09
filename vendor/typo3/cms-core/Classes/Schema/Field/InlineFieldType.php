@@ -37,6 +37,11 @@ final readonly class InlineFieldType extends AbstractFieldType implements Relati
         return 'inline';
     }
 
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
     public function getRelations(): array
     {
         return $this->relations;
@@ -50,5 +55,20 @@ final readonly class InlineFieldType extends AbstractFieldType implements Relati
     public function isMovingChildrenEnabled(): bool
     {
         return (bool)($this->configuration['behaviour']['disableMovingChildrenWithParent'] ?? false) === false;
+    }
+
+    public function isNullable(): false
+    {
+        return false;
+    }
+
+    public function hasDefaultValue(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
     }
 }

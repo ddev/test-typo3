@@ -91,11 +91,13 @@ use TYPO3\CMS\Core\Resource\Search\Result\FileSearchResult;
 use TYPO3\CMS\Core\Resource\Search\Result\FileSearchResultInterface;
 use TYPO3\CMS\Core\Resource\Security\FileNameValidator;
 use TYPO3\CMS\Core\Resource\Service\FileProcessingService;
+use TYPO3\CMS\Core\Resource\Service\ResourceConsistencyService;
 use TYPO3\CMS\Core\Service\FlexFormService;
 use TYPO3\CMS\Core\Utility\Exception\NotImplementedMethodException;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Core\Utility\PathUtility;
 use TYPO3\CMS\Core\Utility\StringUtility;
+use TYPO3\CMS\Core\Validation\ResultException;
 
 /**
  * A "mount point" inside the TYPO3 file handling.
@@ -120,7 +122,7 @@ use TYPO3\CMS\Core\Utility\StringUtility;
  * As all requests have to run through the storage, the storage knows about the
  * permissions of a BE/FE user, the file permissions / limitations of the driver
  * and has some configurable capabilities.
- * Additionally, a BE user can use "filemounts" (known from previous installations)
+ * Additionally, a BE user can use "file mounts" (known from previous installations)
  * to limit his/her work-zone to only a subset (identifier and its subfolders/subfolders)
  * of the user itself.
  *
@@ -131,6 +133,10 @@ use TYPO3\CMS\Core\Utility\StringUtility;
  */
 class ResourceStorage implements ResourceStorageInterface
 {
+    /**
+     * Levels numbers used to generate hashed subfolders in the processing folder
+     */
+    public const PROCESSING_FOLDER_LEVELS = 2;
     /**
      * The storage driver instance belonging to this storage.
      *
@@ -168,7 +174,7 @@ class ResourceStorage implements ResourceStorageInterface
     protected $evaluatePermissions = false;
 
     /**
-     * User filemounts, added as an array, and used as filters
+     * User file mounts, added as an array, and used as filters
      *
      * @var array
      */
@@ -222,11 +228,6 @@ class ResourceStorage implements ResourceStorageInterface
      * @var array
      */
     protected $fileAndFolderNameFilters = [];
-
-    /**
-     * Levels numbers used to generate hashed subfolders in the processing folder
-     */
-    public const PROCESSING_FOLDER_LEVELS = 2;
 
     /**
      * Constructor for a storage object.
@@ -561,7 +562,7 @@ class ResourceStorage implements ResourceStorageInterface
      * User Permissions / File Mounts
      ********************************/
     /**
-     * Adds a filemount as a "filter" for users to only work on a subset of a
+     * Adds a file mount as a "filter" for users to only work on a subset of a
      * storage object
      *
      * @param string $folderIdentifier
@@ -571,10 +572,10 @@ class ResourceStorage implements ResourceStorageInterface
      */
     public function addFileMount($folderIdentifier, $additionalData = [])
     {
-        // check for the folder before we add it as a filemount
+        // check for the folder before we add it as a file mount
         if ($this->driver->folderExists($folderIdentifier) === false) {
             // if there is an error, this is important and should be handled
-            // as otherwise the user would see the whole storage without any restrictions for the filemounts
+            // as otherwise the user would see the whole storage without any restrictions for the file mounts
             throw new FolderDoesNotExistException('Folder for file mount ' . $folderIdentifier . ' does not exist.', 1334427099);
         }
         $data = $this->driver->getFolderInfoByIdentifier($folderIdentifier);
@@ -720,10 +721,8 @@ class ResourceStorage implements ResourceStorageInterface
      * related UI elements should thus be shown (move icon, edit icon, etc.)
      *
      * @param string $action action, can be read, write, delete, editMeta
-     * @param FileInterface $file
-     * @return bool
      */
-    public function checkFileActionPermission($action, FileInterface $file)
+    public function checkFileActionPermission($action, FileInterface $file): bool
     {
         $isProcessedFile = $file instanceof ProcessedFile;
         // Check 1: Allow editing meta data of a file if it is in mount boundaries of a writable file mount
@@ -856,6 +855,23 @@ class ResourceStorage implements ResourceStorageInterface
         $fileNameValidator = GeneralUtility::makeInstance(FileNameValidator::class);
         return $fileNameValidator->isValid($file->getName()) &&
             $fileNameValidator->isValid(basename($file->getIdentifier()));
+    }
+
+    /**
+     * @throws \InvalidArgumentException
+     */
+    protected function assertUploadedFileType(array|UploadedFileInterface $uploadedFileData): void
+    {
+        if ($uploadedFileData instanceof UploadedFileInterface && !$uploadedFileData instanceof UploadedFile) {
+            // This throws if $uploadedFileData is UploadedFileInterface, but is not the TYPO3
+            // core implementation UploadedFile. It should be fair to throw here for now since
+            // getTemporaryFileName() is not part of PSR-7 UploadedFileInterface, but it
+            // could be eventually refactored away or streamlined?
+            throw new \InvalidArgumentException(
+                'Uploaded file with streams are not supported yet',
+                1736765655
+            );
+        }
     }
 
     /**
@@ -1148,6 +1164,14 @@ class ResourceStorage implements ResourceStorageInterface
     }
 
     /**
+     * @throws ResultException
+     */
+    protected function assureResourceConsistency(string|FileInterface $resource, string $fileName = ''): void
+    {
+        GeneralUtility::makeInstance(ResourceConsistencyService::class)->validate($this, $resource, $fileName);
+    }
+
+    /**
      * Check if a file has the permission to be copied on a File/Folder/Storage,
      * if not throw an exception
      *
@@ -1279,6 +1303,7 @@ class ResourceStorage implements ResourceStorageInterface
         )->getFileName();
 
         $this->assureFileAddPermissions($targetFolder, $targetFileName);
+        $this->assureResourceConsistency($localFilePath, $targetFileName);
 
         $replaceExisting = false;
         if ($conflictMode === DuplicationBehavior::CANCEL && $this->driver->fileExistsInFolder($targetFileName, $targetFolder->getIdentifier())) {
@@ -2099,9 +2124,25 @@ class ResourceStorage implements ResourceStorageInterface
         if ($file->getName() === $sanitizedTargetFileName) {
             return $file;
         }
+        if (pathinfo($sanitizedTargetFileName, PATHINFO_EXTENSION) === '') {
+            $sanitizedTargetFileName .= '.' . $file->getExtension();
+        }
         $this->assureFileRenamePermissions($file, $sanitizedTargetFileName);
+        $this->assureResourceConsistency($file, $sanitizedTargetFileName);
+        return $this->handleRenameFile($file, $sanitizedTargetFileName, $conflictMode);
+    }
+
+    protected function handleRenameFile(
+        FileInterface $file,
+        string $targetFileName,
+        string|DuplicationBehavior $conflictMode = DuplicationBehavior::RENAME,
+    ): FileInterface {
+        // The new name should be different from the current.
+        if ($file->getName() === $targetFileName) {
+            return $file;
+        }
         $this->eventDispatcher->dispatch(
-            new BeforeFileRenamedEvent($file, $sanitizedTargetFileName)
+            new BeforeFileRenamedEvent($file, $targetFileName)
         );
 
         if (!$conflictMode instanceof DuplicationBehavior) {
@@ -2115,29 +2156,27 @@ class ResourceStorage implements ResourceStorageInterface
 
         // Call driver method to rename the file and update the index entry
         try {
-            $newIdentifier = $this->driver->renameFile($file->getIdentifier(), $sanitizedTargetFileName);
+            $newIdentifier = $this->driver->renameFile($file->getIdentifier(), $targetFileName);
             if ($file instanceof File) {
                 $file->updateProperties(['identifier' => $newIdentifier]);
                 $this->getIndexer()->updateIndexEntry($file);
             }
         } catch (ExistingTargetFileNameException $exception) {
             if ($conflictMode === DuplicationBehavior::RENAME) {
-                $newName = $this->getUniqueName($file->getParentFolder(), $sanitizedTargetFileName);
+                $newName = $this->getUniqueName($file->getParentFolder(), $targetFileName);
                 $file = $this->renameFile($file, $newName);
             } elseif ($conflictMode === DuplicationBehavior::CANCEL) {
                 throw $exception;
             } elseif ($conflictMode === DuplicationBehavior::REPLACE) {
-                $sourceFileIdentifier = substr($file->getCombinedIdentifier(), 0, (int)strrpos($file->getCombinedIdentifier(), '/') + 1) . $sanitizedTargetFileName;
+                $sourceFileIdentifier = substr($file->getCombinedIdentifier(), 0, (int)strrpos($file->getCombinedIdentifier(), '/') + 1) . $targetFileName;
                 $sourceFile = $this->getResourceFactoryInstance()->getFileObjectFromCombinedIdentifier($sourceFileIdentifier);
                 $file = $this->replaceFile($sourceFile, Environment::getPublicPath() . '/' . $file->getPublicUrl());
             }
         } catch (\RuntimeException $e) {
         }
-
         $this->eventDispatcher->dispatch(
-            new AfterFileRenamedEvent($file, $sanitizedTargetFileName)
+            new AfterFileRenamedEvent($file, $targetFileName)
         );
-
         return $file;
     }
 
@@ -2154,6 +2193,12 @@ class ResourceStorage implements ResourceStorageInterface
     public function replaceFile(FileInterface $file, $localFilePath)
     {
         $this->assureFileReplacePermissions($file);
+        $this->assureResourceConsistency($localFilePath, $file->getName());
+        return $this->handleReplaceFile($file, $localFilePath);
+    }
+
+    protected function handleReplaceFile(FileInterface $file, string $localFilePath): FileInterface
+    {
         if (!file_exists($localFilePath)) {
             throw new \InvalidArgumentException('File "' . $localFilePath . '" does not exist.', 1325842622);
         }
@@ -2191,34 +2236,18 @@ class ResourceStorage implements ResourceStorageInterface
             );
             $conflictMode = DuplicationBehavior::tryFrom($conflictMode) ?? DuplicationBehavior::getDefaultDuplicationBehaviour();
         }
-        if ($uploadedFileData instanceof UploadedFileInterface) {
-            if ($uploadedFileData instanceof UploadedFile) {
-                $localFilePath = $uploadedFileData->getTemporaryFileName();
-                if ($targetFileName === null) {
-                    $targetFileName = $uploadedFileData->getClientFilename();
-                }
-                $size = $uploadedFileData->getSize();
-            } else {
-                // This throws if $uploadedFileData is UploadedFileInterface, but is not the TYPO3
-                // core implementation UploadedFile. It should be fair to throw here for now since
-                // getTemporaryFileName() is not part of PSR-7 UploadedFileInterface, but it
-                // could be eventually refactored away or streamlined?
-                throw new \InvalidArgumentException('Uploaded file with streams are not supported yet', 1736765655);
-            }
-        } else {
-            $localFilePath = $uploadedFileData['tmp_name'];
-            if ($targetFileName === null) {
-                $targetFileName = \Normalizer::normalize($uploadedFileData['name']);
-            }
-            $size = $uploadedFileData['size'];
-        }
-        if ($targetFolder === null) {
-            $targetFolder = $this->getDefaultFolder();
-        }
 
-        $targetFileName = $this->driver->sanitizeFileName($targetFileName);
+        $this->assertUploadedFileType($uploadedFileData);
+        $size = $uploadedFileData instanceof UploadedFile
+            ? $uploadedFileData->getSize()
+            : $uploadedFileData['size'];
+        $localFilePath = $this->getUploadedLocalFilePath($uploadedFileData);
+        $targetFileName = $this->getUploadedTargetFileName($uploadedFileData, $targetFileName);
+        $targetFolder ??= $this->getDefaultFolder();
 
         $this->assureFileUploadPermissions($localFilePath, $targetFolder, $targetFileName, $size);
+        // no `assureResourceConsistency` check here - this is checked in either `replaceFile` or `addFile`
+
         if ($this->hasFileInFolder($targetFileName, $targetFolder) && $conflictMode === DuplicationBehavior::REPLACE) {
             $file = $this->getFileInFolder($targetFileName, $targetFolder);
             $resultObject = $this->replaceFile($file, $localFilePath);
@@ -2226,6 +2255,58 @@ class ResourceStorage implements ResourceStorageInterface
             $resultObject = $this->addFile($localFilePath, $targetFolder, $targetFileName, $conflictMode);
         }
         return $resultObject;
+    }
+
+    /**
+     * Replaces an existing file with new contents and renames the file identifier.
+     */
+    public function replaceAndRenameUploadedFile(array|UploadedFileInterface $sourceFile, FileInterface $targetFile, ?string $targetFileName = null): FileInterface
+    {
+        $this->assertUploadedFileType($sourceFile);
+        $localFilePath = $this->getUploadedLocalFilePath($sourceFile);
+        $localFileSize = $sourceFile instanceof UploadedFile ? $sourceFile->getSize() : $sourceFile['size'];
+        $targetFileName = $this->getUploadedTargetFileName($sourceFile, $targetFileName);
+        $targetFolder = $targetFile->getParentFolder();
+
+        $this->assureFileUploadPermissions($localFilePath, $targetFolder, $targetFileName, $localFileSize);
+        $this->assureFileReplacePermissions($targetFile);
+        $this->assureFileRenamePermissions($targetFile, $targetFileName);
+        $this->assureResourceConsistency($localFilePath, $targetFileName);
+
+        $result = $this->handleReplaceFile($targetFile, $localFilePath);
+        $result = $this->handleRenameFile($result, $targetFileName);
+        return $result;
+    }
+
+    /**
+     * Resolves the actual local file path of a new uploaded file.
+     *
+     * @internal
+     */
+    public function getUploadedLocalFilePath(array|UploadedFileInterface $uploadedFileData): string
+    {
+        $this->assertUploadedFileType($uploadedFileData);
+        return $uploadedFileData instanceof UploadedFile
+            ? $uploadedFileData->getTemporaryFileName()
+            : $uploadedFileData['tmp_name'];
+    }
+
+    /**
+     * Resolves the actual sanitized file name to be used for persisting a new uploaded file.
+     *
+     * @internal
+     */
+    public function getUploadedTargetFileName(array|UploadedFileInterface $uploadedFileData, ?string $targetFileName = null): string
+    {
+        $this->assertUploadedFileType($uploadedFileData);
+        if ($targetFileName === null) {
+            if ($uploadedFileData instanceof UploadedFile) {
+                $targetFileName = $uploadedFileData->getClientFilename();
+            } else {
+                $targetFileName = \Normalizer::normalize($uploadedFileData['name']);
+            }
+        }
+        return $this->driver->sanitizeFileName($targetFileName);
     }
 
     /********************
@@ -2456,16 +2537,31 @@ class ResourceStorage implements ResourceStorageInterface
             new BeforeFolderDeletedEvent($folderObject)
         );
 
-        foreach ($this->getFilesInFolder($folderObject, 0, 0, false, $deleteRecursively) as $file) {
-            $this->deleteFile($file);
-        }
+        // Disable permission check to find nearest recycler and move folder without errors
+        $currentPermissions = $this->evaluatePermissions;
+        $this->evaluatePermissions = false;
 
-        $result = $this->driver->deleteFolder($folderObject->getIdentifier(), $deleteRecursively);
+        $recyclerFolder = $this->getNearestRecyclerFolder($folderObject);
+
+        if ($recyclerFolder) {
+            $folderObject->moveTo($recyclerFolder);
+            $result = false;
+            $this->evaluatePermissions = $currentPermissions;
+        } else {
+            $this->evaluatePermissions = $currentPermissions;
+
+            foreach ($this->getFilesInFolder($folderObject, 0, 0, false, $deleteRecursively) as $file) {
+                $this->deleteFile($file);
+            }
+
+            $result = $this->driver->deleteFolder($folderObject->getIdentifier(), $deleteRecursively);
+        }
 
         $this->eventDispatcher->dispatch(
             new AfterFolderDeletedEvent($folderObject, $result)
         );
-        return $result;
+
+        return $recyclerFolder ? true : $result;
     }
 
     /**
@@ -2498,6 +2594,9 @@ class ResourceStorage implements ResourceStorageInterface
      */
     public function getFoldersInFolder(Folder $folder, $start = 0, $maxNumberOfItems = 0, $useFilters = true, $recursive = false, $sort = '', $sortRev = false)
     {
+        if (!$this->isOnline()) {
+            return [];
+        }
         $filters = $useFilters == true ? $this->getFileAndFolderNameFilters() : [];
 
         $folderIdentifiers = $this->driver->getFoldersInFolder($folder->getIdentifier(), $start, $maxNumberOfItems, $recursive, $filters, $sort, $sortRev);
@@ -2693,7 +2792,7 @@ class ResourceStorage implements ResourceStorageInterface
      * or the first mount point of this storage for this user
      * if $respectFileMounts is set.
      *
-     * @todo: this is a bad method design, because the calling code can never fetch all filemounts nor traverse them.
+     * @todo: this is a bad method design, because the calling code can never fetch all file mounts nor traverse them.
      */
     public function getRootLevelFolder(bool $respectFileMounts = true): Folder
     {
@@ -2806,7 +2905,7 @@ class ResourceStorage implements ResourceStorageInterface
                 $folderRole = FolderInterface::ROLE_USER_MOUNT;
             }
         }
-        if ($folder instanceof Folder && $this->isProcessingFolder($folder)) {
+        if ($this->isOnline() && $folder instanceof Folder && $this->isProcessingFolder($folder)) {
             $folderRole = FolderInterface::ROLE_PROCESSING;
         }
 
@@ -2902,21 +3001,26 @@ class ResourceStorage implements ResourceStorageInterface
             $file->getIdentifier(),
             self::PROCESSING_FOLDER_LEVELS
         );
-
         try {
             foreach ($nestedFolderNames as $folderName) {
-                if ($processingFolder->hasFolder($folderName)) {
+                try {
                     $processingFolder = $processingFolder->getSubfolder($folderName);
-                } else {
+                } catch (\InvalidArgumentException) {
                     $currentEvaluatePermissions = $processingFolder->getStorage()->getEvaluatePermissions();
                     $processingFolder->getStorage()->setEvaluatePermissions(false);
-                    $processingFolder = $processingFolder->createFolder($folderName);
+
+                    try {
+                        $processingFolder = $processingFolder->createFolder($folderName);
+                    } catch (ExistingTargetFolderException) {
+                        // The folder may have been created meanwhile in a parallel process, which is fine, we take it.
+                        $processingFolder = $processingFolder->getSubfolder($folderName);
+                    }
+
                     $processingFolder->getStorage()->setEvaluatePermissions($currentEvaluatePermissions);
                 }
             }
         } catch (FolderDoesNotExistException $e) {
         }
-
         return $processingFolder;
     }
 
@@ -2987,19 +3091,19 @@ class ResourceStorage implements ResourceStorageInterface
     }
 
     /**
-     * Get the nearest Recycler folder for given file
+     * Get the nearest Recycler folder for given file or folder
      *
      * Return null if:
-     *  - There is no folder with ROLE_RECYCLER in the rootline of the given File
-     *  - File is a ProcessedFile (we don't know the concept of recycler folders for processedFiles)
-     *  - File is located in a folder with ROLE_RECYCLER
+     *  - There is no folder with ROLE_RECYCLER in the rootline of the given Resource
+     *  - Resource is a ProcessedFile (we don't know the concept of recycler folders for processedFiles)
+     *  - Resource is located in a folder with ROLE_RECYCLER
      *
-     * @param FileInterface $file
+     * @param ResourceInterface $resource
      * @return Folder|null
      */
-    protected function getNearestRecyclerFolder(FileInterface $file)
+    protected function getNearestRecyclerFolder(ResourceInterface $resource)
     {
-        if ($file instanceof ProcessedFile) {
+        if ($resource instanceof ProcessedFile) {
             return null;
         }
         // if the storage is not browsable we cannot fetch the parent folder of the file so no recycler handling is possible
@@ -3008,7 +3112,7 @@ class ResourceStorage implements ResourceStorageInterface
         }
 
         $recyclerFolder = null;
-        $folder = $file->getParentFolder();
+        $folder = $resource->getParentFolder();
 
         do {
             if ($folder->getRole() === FolderInterface::ROLE_RECYCLER) {
@@ -3016,6 +3120,11 @@ class ResourceStorage implements ResourceStorageInterface
             }
 
             foreach ($folder->getSubfolders() as $subFolder) {
+                // do not use a  _recycler_ as the trash bin for itself
+                if ($subFolder->getIdentifier() === $resource->getIdentifier()) {
+                    continue;
+                }
+
                 if ($subFolder->getRole() === FolderInterface::ROLE_RECYCLER) {
                     $recyclerFolder = $subFolder;
                     break;

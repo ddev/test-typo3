@@ -22,8 +22,11 @@ possible.
 The API supports mapping and handling of file uploads and deletions for the
 following scenarios:
 
-*   Property of type :php-short:`\TYPO3\CMS\Core\Resource\FileReference` in a domain model
-*   Property of type :php:`ObjectStorage<FileReference>` in a domain model
+*   Property of type :php-short:`\TYPO3\CMS\Extbase\Domain\Model\FileReference`
+    in a domain model
+*   Property of type
+    :php:`\TYPO3\CMS\Extbase\Persistence\ObjectStorage<\TYPO3\CMS\Extbase\Domain\Model\FileReference>`
+    in a domain model
 
 File uploads can be validated by the following rules:
 
@@ -71,6 +74,7 @@ Example:
             'maxFiles' => 1,
             'fileSize' => ['minimum' => '0K', 'maximum' => '2M'],
             'mimeType' => ['allowedMimeTypes' => ['image/jpeg', 'image/png']],
+            'fileExtension' => ['allowedFileExtensions' => ['jpg', 'jpeg', 'png']],
         ],
         'uploadFolder' => '1:/user_upload/files/',
     ])]
@@ -87,8 +91,8 @@ can achieve with a manual configuration as shown below.
 The currently available configuration array keys are:
 
 *   `validation` (:php:`array` with keys `required`, `maxFiles`, `minFiles`,
-    `fileSize`, `allowedMimeTypes`, `mimeType`, `imageDimensions`, see
-    :ref:`83749-validationkeys`)
+    `fileSize`, `fileExtension`, `allowedMimeTypes`, `mimeType`, `imageDimensions`,
+    see :ref:`83749-validationkeys`)
 *   `uploadFolder` (:php:`string`, destination folder)
 *   `duplicationBehavior` (:php:`object`, behaviour when file exists)
 *   `addRandomSuffix` (:php:`bool`, suffixing files)
@@ -114,12 +118,15 @@ Example:
     {
         $mimeTypeValidator = GeneralUtility::makeInstance(MimeTypeValidator::class);
         $mimeTypeValidator->setOptions(['allowedMimeTypes' => ['image/jpeg']]);
+        $fileExtensionValidator = GeneralUtility::makeInstance(FileExtensionValidator::class);
+        $fileExtensionValidator->setOptions(['allowedFileExtensions' => ['jpg', 'jpeg']);
 
         $fileHandlingServiceConfiguration = $this->arguments->getArgument('myArgument')->getFileHandlingServiceConfiguration();
         $fileHandlingServiceConfiguration->addFileUploadConfiguration(
             (new FileUploadConfiguration('myPropertyName'))
                 ->setRequired()
                 ->addValidator($mimeTypeValidator)
+                ->addValidator($fileExtensionValidator)
                 ->setMaxFiles(1)
                 ->setUploadFolder('1:/user_upload/files/')
         );
@@ -155,16 +162,19 @@ Validation:
 ~~~~~~~~~~~
 
 File upload validation is defined in an array of validators in the
-:php-short:`\TYPO3\CMS\Extbase\Mvc\Controller\FileUploadConfiguration` object. The validator
+:php-short:`\TYPO3\CMS\Extbase\Mvc\Controller\FileUploadConfiguration` object.
+
+The validators
 :php:`\TYPO3\CMS\Extbase\Validation\Validator\FileNameValidator`,
-which ensures that no executable PHP files can
-be uploaded, is added by default if the file upload configuration object
-is created using the
-:php-short:`\TYPO3\CMS\Extbase\Annotation\FileUpload` attribute.
+(ensures that no executable PHP files can
+be uploaded) and :php:`\TYPO3\CMS\Extbase\Validation\Validator\FileExtensionMimeTypeConsistencyValidator`
+(ensuring that the file extension matches the expected mime-type assumptions),
+are enforced and executed by default.
 
 In addition, Extbase includes the following validators to validate an
 :php-short:`\TYPO3\CMS\Core\Http\UploadedFile` object:
 
+*   :php:`\TYPO3\CMS\Extbase\Validation\Validator\FileExtensionValidator`
 *   :php:`\TYPO3\CMS\Extbase\Validation\Validator\FileSizeValidator`
 *   :php:`\TYPO3\CMS\Extbase\Validation\Validator\MimeTypeValidator`
 *   :php:`\TYPO3\CMS\Extbase\Validation\Validator\ImageDimensionsValidator`
@@ -251,7 +261,7 @@ The example shows how to modify the file upload configuration for the argument
 :php:`item` and the property :php:`file`. The minimum amount of files to be
 uploaded is set to :php:`2` and a custom validator is added.
 
-To remove all defined validators except the :php:`DenyPhpUploadValidator`, use
+To remove all defined validators except the :php:`FileNameValidator`, use
 the :php:`resetValidators()` method.
 
 
@@ -294,6 +304,7 @@ section of the :php-short:`\TYPO3\CMS\Extbase\Annotation\FileUpload` attribute:
 *   :php:`required`
 *   :php:`minFiles`
 *   :php:`maxFiles`
+*   :php:`fileExtension`  (for :php:`TYPO3\CMS\Extbase\Validation\Validator\FileExtensionValidator`)
 *   :php:`fileSize`  (for :php:`TYPO3\CMS\Extbase\Validation\Validator\FilesizeValidator`)
 *   :php:`imageDimensions` (for :php:`TYPO3\CMS\Extbase\Validation\Validator\ImageDimensionsValidator`)
 *   :php:`mimeType` (for :php:`TYPO3\CMS\Extbase\Validation\Validator\MimeTypeValidator`)
@@ -309,13 +320,15 @@ Example:
             'maxFiles' => 1,
             'fileSize' => ['minimum' => '0K', 'maximum' => '2M'],
             'mimeType' => ['allowedMimeTypes' => ['image/jpeg']],
+            'fileExtension' => ['allowedFileExtensions' => ['jpg', 'jpeg']],
             'imageDimensions' => ['maxWidth' => 4096, 'maxHeight' => 4096]
         ],
         'uploadFolder' => '1:/user_upload/extbase_single_file/',
     ])]
 
 Extbase will internally use the Extbase file upload validators for
-:php:`fileSize`, :php:`mimeType` and :php:`imageDimensions` validation.
+:php:`fileExtensionMimeTypeConsistency`, :php:`fileExtension`, :php:`fileSize`,
+:php:`mimeType` and :php:`imageDimensions` validation.
 
 Custom validators can be created according to project requirements and must
 extend the Extbase :php-short:`\TYPO3\CMS\Extbase\Validation\Validator\AbstractValidator`.
@@ -358,14 +371,15 @@ The new Fluid ViewHelper
 :ref:`Form.uploadDeleteCheckbox ViewHelper <f:form.uploadDeleteCheckbox> <t3viewhelper:typo3-fluid-form-uploaddeletecheckbox>`
 can be used to show a "delete file" checkbox in a form.
 
-Example for object with :php-short:`\TYPO3\CMS\Core\Resource\FileReference` property:
+Example for object with :php-short:`\TYPO3\CMS\Extbase\Domain\Model\FileReference` property:
 
 ..  code-block:: php
 
     <f:form.uploadDeleteCheckbox property="file" fileReference="{object.file}" />
 
-Example for an object with an :php:`ObjectStorage<FileReference>` property,
-containing multiple files and allowing to delete the first one
+Example for an object with an
+:php:`TYPO3\CMS\Extbase\Persistence\ObjectStorage<\TYPO3\CMS\Extbase\Domain\Model\FileReference>`
+property, containing multiple files and allowing to delete the first one
 (iteration is possible within Fluid, to do that for every object of the collection):
 
 ..  code-block:: php
@@ -385,7 +399,7 @@ file deletions for properties of arguments. Files are deleted directly without
 checking whether the current file is referenced by other objects.
 
 Apart from using this ViewHelper, it is of course still possible to manipulate
-:php-short:`\TYPO3\CMS\Core\Resource\FileReference` properties with custom logic before persistence.
+:php-short:`\TYPO3\CMS\Extbase\Domain\Model\FileReference` properties with custom logic before persistence.
 
 New PSR-14 events
 -----------------

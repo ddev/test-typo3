@@ -10,4 +10,4 @@
  *
  * The TYPO3 project - inspiring people to share!
  */
-import RegularEvent from"@typo3/core/event/regular-event.js";class ThrottleEvent extends RegularEvent{constructor(t,e,r){super(t,e),this.callback=this.throttle(e,r)}throttle(t,e){let r=!1;return function(...l){r||(t.apply(this,l),r=!0,setTimeout((()=>{r=!1,t.apply(this,l)}),e))}}}export default ThrottleEvent;
+import a from"@typo3/core/event/regular-event.js";class s extends a{constructor(n,l,t){super(n,l),this.callback=this.throttle(l,t)}throttle(n,l){let t=null,e=null;return function(...u){if(t=u,e!==null)return;const r=()=>{if(t===null){clearInterval(e),e=null;return}n.apply(this,t),t=null};r(),e=setInterval(r,l)}}}export{s as default};

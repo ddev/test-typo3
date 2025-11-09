@@ -25,6 +25,7 @@ use Psr\Http\Message\UriInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\Attribute\Autoconfigure;
 use Symfony\Component\Mime\Address;
+use Symfony\Component\RateLimiter\RateLimiterFactory;
 use TYPO3\CMS\Backend\Routing\UriBuilder;
 use TYPO3\CMS\Core\Context\Context;
 use TYPO3\CMS\Core\Crypto\HashService;
@@ -65,8 +66,6 @@ use TYPO3\CMS\Core\Utility\GeneralUtility;
 readonly class PasswordReset
 {
     protected const TOKEN_VALID_UNTIL = '+2 hours';
-    protected const MAXIMUM_RESET_ATTEMPTS = 3;
-    protected const MAXIMUM_RESET_ATTEMPTS_SINCE = '-30 minutes';
 
     public function __construct(
         private LoggerInterface $logger,
@@ -78,6 +77,7 @@ readonly class PasswordReset
         private PasswordHashFactory $passwordHashFactory,
         private UriBuilder $uriBuilder,
         private SessionManager $sessionManager,
+        private RateLimiterFactory $rateLimiterFactory,
     ) {}
 
     /**
@@ -132,7 +132,7 @@ readonly class PasswordReset
         if (!GeneralUtility::validEmail($emailAddress)) {
             return;
         }
-        if ($this->hasExceededMaximumAttemptsForReset($context, $emailAddress)) {
+        if ($this->hasExceededMaximumAttemptsForReset($emailAddress)) {
             $this->logger->alert('Password reset requested for email {email} but was requested too many times.', ['email' => $emailAddress]);
             return;
         }
@@ -435,30 +435,26 @@ readonly class PasswordReset
      */
     protected function log(string $message, int $action, int $error, int $userId, array $data, $ipAddress, Context $context): void
     {
-        $fields = [
-            'userid' => $userId,
-            'type' => SystemLogType::LOGIN,
-            'channel' => SystemLogType::toChannel(SystemLogType::LOGIN),
-            'level' => SystemLogType::toLevel(SystemLogType::LOGIN),
-            'action' => $action,
-            'error' => $error,
-            'details_nr' => 1,
-            'details' => $message,
-            'log_data' => json_encode($data),
-            'tablename' => 'be_users',
-            'recuid' => $userId,
-            'IP' => (string)$ipAddress,
-            'tstamp' => $context->getAspect('date')->get('timestamp'),
-            'event_pid' => 0,
-            'NEWid' => '',
-            'workspace' => 0,
-        ];
-
         $this->connectionPool
             ->getConnectionForTable('sys_log')
             ->insert(
                 'sys_log',
-                $fields,
+                [
+                    'userid' => $userId,
+                    'type' => SystemLogType::LOGIN,
+                    'channel' => SystemLogType::toChannel(SystemLogType::LOGIN),
+                    'level' => SystemLogType::toLevel(SystemLogType::LOGIN),
+                    'action' => $action,
+                    'error' => $error,
+                    'details' => $message,
+                    'log_data' => json_encode($data),
+                    'tablename' => 'be_users',
+                    'recuid' => $userId,
+                    'IP' => (string)$ipAddress,
+                    'tstamp' => $context->getAspect('date')->get('timestamp'),
+                    'event_pid' => 0,
+                    'workspace' => 0,
+                ],
                 [
                     Connection::PARAM_INT,
                     Connection::PARAM_INT,
@@ -466,7 +462,6 @@ readonly class PasswordReset
                     Connection::PARAM_STR,
                     Connection::PARAM_INT,
                     Connection::PARAM_INT,
-                    Connection::PARAM_INT,
                     Connection::PARAM_STR,
                     Connection::PARAM_STR,
                     Connection::PARAM_STR,
@@ -474,40 +469,20 @@ readonly class PasswordReset
                     Connection::PARAM_STR,
                     Connection::PARAM_INT,
                     Connection::PARAM_INT,
-                    Connection::PARAM_STR,
-                    Connection::PARAM_STR,
+                    Connection::PARAM_INT,
                 ]
             );
     }
 
     /**
-     * Checks if an email reset link has been requested more than 3 times in the last 30mins.
-     * If a password was successfully reset more than three times in 30 minutes, it would still fail.
+     * Checks if an email reset link has been requested more than the configured amount of times.
+     * Default values are 3 times in the last 30 minutes configured in Services.yaml
      */
-    protected function hasExceededMaximumAttemptsForReset(Context $context, string $email): bool
+    protected function hasExceededMaximumAttemptsForReset(string $email): bool
     {
-        $now = $context->getAspect('date')->getDateTime();
-        $numberOfAttempts = $this->getNumberOfInitiatedResetsForEmail($now->modify(self::MAXIMUM_RESET_ATTEMPTS_SINCE), $email);
-        return $numberOfAttempts > self::MAXIMUM_RESET_ATTEMPTS;
-    }
-
-    /**
-     * SQL query to find the amount of initiated resets from a given time.
-     */
-    protected function getNumberOfInitiatedResetsForEmail(\DateTimeInterface $since, string $email): int
-    {
-        $queryBuilder = $this->connectionPool->getQueryBuilderForTable('sys_log');
-        return (int)$queryBuilder
-            ->count('uid')
-            ->from('sys_log')
-            ->where(
-                $queryBuilder->expr()->eq('type', $queryBuilder->createNamedParameter(SystemLogType::LOGIN)),
-                $queryBuilder->expr()->eq('action', $queryBuilder->createNamedParameter(SystemLogLoginAction::PASSWORD_RESET_REQUEST)),
-                $queryBuilder->expr()->eq('log_data', $queryBuilder->createNamedParameter(json_encode(['email' => $email]))),
-                $queryBuilder->expr()->gte('tstamp', $queryBuilder->createNamedParameter($since->getTimestamp(), Connection::PARAM_INT))
-            )
-            ->executeQuery()
-            ->fetchOne();
+        $limiter = $this->rateLimiterFactory->create($email);
+        $limit = $limiter->consume();
+        return !$limit->isAccepted();
     }
 
     /**

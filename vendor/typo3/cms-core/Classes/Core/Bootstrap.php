@@ -79,6 +79,7 @@ class Bootstrap
             ClassLoadingInformation::registerClassLoadingInformation();
         }
 
+        // @todo Remove output buffering in TYPO3 v14
         static::startOutputBuffering();
 
         $configurationManager = static::createConfigurationManager();
@@ -512,7 +513,6 @@ class Bootstrap
      *
      * @param string $className usually \TYPO3\CMS\Core\Authentication\BackendUserAuthentication::class but can be used for CLI
      * @param ServerRequestInterface|null $request
-     * @internal This is not a public API method, do not use in own extensions
      */
     public static function initializeBackendUser($className = BackendUserAuthentication::class, ?ServerRequestInterface $request = null)
     {
@@ -526,8 +526,6 @@ class Bootstrap
 
     /**
      * Initializes and ensures authenticated access
-     *
-     * @internal This is not a public API method, do not use in own extensions
      */
     public static function initializeBackendAuthentication()
     {

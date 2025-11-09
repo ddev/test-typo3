@@ -36,6 +36,9 @@ use TYPO3\CMS\Core\Database\Query\Expression\ExpressionBuilder;
 use TYPO3\CMS\Core\Database\Query\QueryHelper;
 use TYPO3\CMS\Core\Database\Query\Restriction\DocumentTypeExclusionRestriction;
 use TYPO3\CMS\Core\Database\Query\Restriction\FrontendRestrictionContainer;
+use TYPO3\CMS\Core\Domain\DateTimeFactory;
+use TYPO3\CMS\Core\Domain\Record;
+use TYPO3\CMS\Core\Domain\RecordInterface;
 use TYPO3\CMS\Core\Domain\Repository\PageRepository;
 use TYPO3\CMS\Core\Html\HtmlCropper;
 use TYPO3\CMS\Core\Html\HtmlParser;
@@ -106,6 +109,19 @@ class ContentObjectRenderer implements LoggerAwareInterface
 {
     use LoggerAwareTrait;
     use DefaultJavaScriptAssetTrait;
+
+    /**
+     * Indicates that object type is USER.
+     *
+     * @see ContentObjectRender::$userObjectType
+     */
+    public const OBJECTTYPE_USER_INT = 1;
+    /**
+     * Indicates that object type is USER.
+     *
+     * @see ContentObjectRender::$userObjectType
+     */
+    public const OBJECTTYPE_USER = 2;
 
     /**
      * @var ContainerInterface|null
@@ -371,19 +387,6 @@ class ContentObjectRenderer implements LoggerAwareInterface
      */
     private ?ServerRequestInterface $request = null;
 
-    /**
-     * Indicates that object type is USER.
-     *
-     * @see ContentObjectRender::$userObjectType
-     */
-    public const OBJECTTYPE_USER_INT = 1;
-    /**
-     * Indicates that object type is USER.
-     *
-     * @see ContentObjectRender::$userObjectType
-     */
-    public const OBJECTTYPE_USER = 2;
-
     public function __construct(?TypoScriptFrontendController $typoScriptFrontendController = null, ?ContainerInterface $container = null)
     {
         $this->typoScriptFrontendController = $typoScriptFrontendController;
@@ -450,7 +453,7 @@ class ContentObjectRenderer implements LoggerAwareInterface
      * Well, it has to be called manually since it is not a real constructor function.
      * So after making an instance of the class, call this function and pass to it a database record and the tablename from where the record is from. That will then become the "current" record loaded into memory and accessed by the .fields property found in eg. stdWrap.
      *
-     * @param array $data The record data that is rendered.
+     * @param array|int|string $data The record data that is rendered.
      * @param string $table The table that the data record is from.
      */
     public function start($data, $table = '')
@@ -467,13 +470,20 @@ class ContentObjectRenderer implements LoggerAwareInterface
         );
 
         $autoTagging = GeneralUtility::makeInstance(Features::class)->isFeatureEnabled('frontend.cache.autoTagging');
-        if ($this->currentRecord !== '' && $autoTagging) {
+        if (is_array($this->data) && $this->currentRecord !== '' && $autoTagging) {
             $cacheLifetimeCalculator = GeneralUtility::makeInstance(CacheLifetimeCalculator::class);
+            $lifetime = $cacheLifetimeCalculator->calculateLifetimeForRow($this->table, $this->data);
+            $cacheTags = [
+                sprintf('%s_%s', $this->table, ($this->data['uid'] ?? 0)),
+            ];
+            if ((int)($this->data['_LOCALIZED_UID'] ?? 0) > 0) {
+                $cacheTags[] = sprintf('%s_%s', $this->table, (int)$this->data['_LOCALIZED_UID']);
+            }
             $this->request?->getAttribute('frontend.cache.collector')?->addCacheTags(
-                new CacheTag(
-                    name: sprintf('%s_%s', $this->table, ($this->data['uid'] ?? 0)),
-                    lifetime: $cacheLifetimeCalculator->calculateLifetimeForRow($this->table, $this->data)
-                )
+                ...array_map(
+                    static fn(string $cacheTag) => new CacheTag($cacheTag, $lifetime),
+                    $cacheTags,
+                ),
             );
         }
     }
@@ -675,14 +685,21 @@ class ContentObjectRenderer implements LoggerAwareInterface
             if (!empty($key)) {
                 $cacheFrontend = GeneralUtility::makeInstance(CacheManager::class)->getCache('hash');
                 $tags = $this->calculateCacheTags($cacheConfiguration);
-                $lifetime = $this->calculateCacheLifetime($cacheConfiguration);
+                $cacheLifetime = $this->calculateCacheLifetime($cacheConfiguration);
+                $cacheTagLifetime = $this->calculateCacheTagLifetime($cacheLifetime);
                 $cachedData = [
                     'content' => $content,
                     'cacheTags' => $tags,
                 ];
-                $cacheFrontend->set($key, $cachedData, $tags, $lifetime);
+                $cacheFrontend->set($key, $cachedData, $tags, $cacheLifetime);
+
+                // If no tags are given, we restrict the maximum lifetime of the cache to the lifetime of the cache entry.
+                if ($tags === []) {
+                    $this->getRequest()->getAttribute('frontend.cache.collector')->restrictMaximumLifetime($cacheTagLifetime);
+                }
+
                 $this->getRequest()->getAttribute('frontend.cache.collector')->addCacheTags(
-                    ...array_map(fn(string $tag) => new CacheTag($tag), $tags)
+                    ...array_map(fn(string $tag) => new CacheTag($tag, $cacheTagLifetime), $tags)
                 );
             }
         }
@@ -936,8 +953,12 @@ class ContentObjectRenderer implements LoggerAwareInterface
                 ];
                 $url = $this->cObjGetSingle('IMG_RESOURCE', $imgResourceConf);
                 if (!$url) {
-                    // If no imagemagick / gm is available
-                    $url = $imageFile;
+                    // Either imagemagick/gm is not available or image URL could not be resolved due to invalid image file
+                    if ($imageFile instanceof File || $imageFile instanceof FileReference) {
+                        $url = $imageFile->getPublicUrl();
+                    } else {
+                        $url = $imageFile;
+                    }
                 }
             }
             $target = (string)$this->stdWrapValue('target', $conf ?? []);
@@ -1027,15 +1048,21 @@ class ContentObjectRenderer implements LoggerAwareInterface
      * The SYS_LASTCHANGED timestamp can be used by various caching/indexing applications to determine if the page has new content.
      * Therefore you should call this function with the last-changed timestamp of any element you display.
      *
-     * @param int $tstamp Unix timestamp (number of seconds since 1970)
+     * @param RecordInterface|int|string|float|null $item a record objet or a Unix timestamp (number of seconds since 1970)
      * @see TypoScriptFrontendController::setSysLastChanged()
      */
-    public function lastChanged($tstamp)
+    public function lastChanged(RecordInterface|int|string|float|null $item)
     {
-        $tstamp = (int)$tstamp;
+        if (MathUtility::canBeInterpretedAsInteger($item)) {
+            $item = (int)$item;
+        } elseif ($item instanceof Record) {
+            $item = $item->getSystemProperties()->getLastUpdatedAt()->getTimestamp();
+        } else {
+            $item = 0;
+        }
         $tsfe = $this->getTypoScriptFrontendController();
-        if ($tstamp > (int)($tsfe->register['SYS_LASTCHANGED'] ?? 0)) {
-            $tsfe->register['SYS_LASTCHANGED'] = $tstamp;
+        if ($item > (int)($tsfe->register['SYS_LASTCHANGED'] ?? 0)) {
+            $tsfe->register['SYS_LASTCHANGED'] = $item;
         }
     }
 
@@ -1095,10 +1122,10 @@ class ContentObjectRenderer implements LoggerAwareInterface
         $eventDispatcher = GeneralUtility::makeInstance(EventDispatcherInterface::class);
 
         // Cache handling
-        if (isset($conf['cache.']) && is_array($conf['cache.'])) {
-            $conf['cache.']['key'] = $this->stdWrapValue('key', $conf['cache.'] ?? []);
-            $conf['cache.']['tags'] = $this->stdWrapValue('tags', $conf['cache.'] ?? []);
-            $conf['cache.']['lifetime'] = $this->stdWrapValue('lifetime', $conf['cache.'] ?? []);
+        if (is_array($conf['cache.'] ?? null)) {
+            $conf['cache.']['key'] = $this->stdWrapValue('key', $conf['cache.']);
+            $conf['cache.']['tags'] = $this->stdWrapValue('tags', $conf['cache.']);
+            $conf['cache.']['lifetime'] = $this->stdWrapValue('lifetime', $conf['cache.']);
             $conf['cacheRead'] = 1;
             $conf['cacheStore'] = 1;
         }
@@ -1491,7 +1518,7 @@ class ContentObjectRenderer implements LoggerAwareInterface
         $padType = STR_PAD_RIGHT;
 
         if (!empty($conf['strPad.']['type'])) {
-            $type = (string)$this->stdWrapValue('type', $conf['strPad.'] ?? []);
+            $type = (string)$this->stdWrapValue('type', $conf['strPad.']);
             if (strtolower($type) === 'left') {
                 $padType = STR_PAD_LEFT;
             } elseif (strtolower($type) === 'both') {
@@ -2392,8 +2419,15 @@ class ContentObjectRenderer implements LoggerAwareInterface
                 $event->getTags(),
                 $event->getLifetime()
             );
+
+        $cacheTagLifetime = $this->calculateCacheTagLifetime($event->getLifetime());
+        // If no tags are given, we restrict the maximum lifetime of the cache to the lifetime of the cache entry.
+        if ($event->getTags() === []) {
+            $this->getRequest()->getAttribute('frontend.cache.collector')->restrictMaximumLifetime($cacheTagLifetime);
+        }
+
         $this->getRequest()->getAttribute('frontend.cache.collector')->addCacheTags(
-            ...array_map(fn(string $tag) => new CacheTag($tag, $event->getLifetime()), $event->getTags())
+            ...array_map(fn(string $tag) => new CacheTag($tag, $cacheTagLifetime), $event->getTags())
         );
         return $event->getContent();
     }
@@ -2828,7 +2862,7 @@ class ContentObjectRenderer implements LoggerAwareInterface
             $splitCount = $min;
         }
         $wrap = (string)$this->stdWrapValue('wrap', $conf ?? []);
-        $cObjNumSplitConf = isset($conf['cObjNum.']) ? $this->stdWrap($conf['cObjNum'] ?? '', $conf['cObjNum.'] ?? []) : (string)($conf['cObjNum'] ?? '');
+        $cObjNumSplitConf = isset($conf['cObjNum.']) ? $this->stdWrap($conf['cObjNum'] ?? '', $conf['cObjNum.']) : (string)($conf['cObjNum'] ?? '');
         $splitArr = [];
         if ($wrap !== '' || $cObjNumSplitConf !== '') {
             $splitArr['wrap'] = $wrap;
@@ -3240,7 +3274,7 @@ class ContentObjectRenderer implements LoggerAwareInterface
                 } else {
                     $tagContent = substr($data, 1, -1);
                 }
-                $tag = explode(' ', trim($tagContent), 2);
+                $tag = preg_split('/[\t\n\f ]/', trim($tagContent), 2);
                 $tag[0] = strtolower($tag[0]);
                 // end tag like </li>
                 if (str_starts_with($tag[0], '/')) {
@@ -3546,7 +3580,7 @@ class ContentObjectRenderer implements LoggerAwareInterface
         // split by mailto logic
         $textpieces = explode('mailto:', $data);
         $pieces = count($textpieces);
-        $textstr = $textpieces[0] ?? '';
+        $textstr = $textpieces[0];
         for ($i = 1; $i < $pieces; $i++) {
             $len = strcspn($textpieces[$i], chr(32) . "\t" . CRLF);
             if (trim(substr($textstr, -1)) === '' && $len) {
@@ -3876,7 +3910,7 @@ class ContentObjectRenderer implements LoggerAwareInterface
                         if ($absoluteFilePath === '') {
                             throw new \RuntimeException('Asset "' . $key . '" not found', 1670713983);
                         }
-                        $retVal = GeneralUtility::createVersionNumberedFilename(PathUtility::getAbsoluteWebPath($absoluteFilePath));
+                        $retVal = PathUtility::getAbsoluteWebPath(GeneralUtility::createVersionNumberedFilename($absoluteFilePath));
                         break;
                     case 'parameters':
                         $retVal = $this->parameters[$key] ?? null;
@@ -4422,7 +4456,7 @@ class ContentObjectRenderer implements LoggerAwareInterface
     {
         if ($wrap) {
             $wrapArr = explode($char, $wrap);
-            $content = trim($wrapArr[0] ?? '') . $content . trim($wrapArr[1] ?? '');
+            $content = trim($wrapArr[0]) . $content . trim($wrapArr[1] ?? '');
         }
         return $content;
     }
@@ -4589,31 +4623,15 @@ class ContentObjectRenderer implements LoggerAwareInterface
      */
     public function calcAge($seconds, $labels = null)
     {
-        if ($labels === null || MathUtility::canBeInterpretedAsInteger($labels)) {
-            $labels = ' min| hrs| days| yrs| min| hour| day| year';
-        } else {
-            $labels = str_replace('"', '', $labels);
-        }
-        $labelArr = explode('|', $labels);
-        if (count($labelArr) === 4) {
-            $labelArr = array_merge($labelArr, $labelArr);
-        }
-        $absSeconds = abs($seconds);
-        $sign = $seconds > 0 ? 1 : -1;
-        if ($absSeconds < 3600) {
-            $val = round($absSeconds / 60);
-            $seconds = $sign * $val . ($val == 1 ? $labelArr[4] : $labelArr[0]);
-        } elseif ($absSeconds < 24 * 3600) {
-            $val = round($absSeconds / 3600);
-            $seconds = $sign * $val . ($val == 1 ? $labelArr[5] : $labelArr[1]);
-        } elseif ($absSeconds < 365 * 24 * 3600) {
-            $val = round($absSeconds / (24 * 3600));
-            $seconds = $sign * $val . ($val == 1 ? $labelArr[6] : $labelArr[2]);
-        } else {
-            $val = round($absSeconds / (365 * 24 * 3600));
-            $seconds = $sign * $val . ($val == 1 ? ($labelArr[7] ?? null) : ($labelArr[3] ?? null));
-        }
-        return $seconds;
+        $now = DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME']);
+        $then = DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME'] - $seconds);
+        // Show past dates without a leading sign, but future dates with.
+        // This does not make sense, but is kept for legacy reasons.
+        $sign = $then > $now ? '-' : '';
+        // Take an absolute diff, since we don't want formatDateInterval to output the (correct) sign
+        $diff = $now->diff($then, true);
+        $labels = ($labels === null || MathUtility::canBeInterpretedAsInteger($labels)) ? 'min|hrs|days|yrs|min|hour|day|year' : str_replace('"', '', $labels);
+        return $sign . (new DateFormatter())->formatDateInterval($diff, $labels);
     }
 
     /**
@@ -4922,7 +4940,7 @@ class ContentObjectRenderer implements LoggerAwareInterface
                         $conf['begin'] = str_ireplace('total', $count, (string)$conf['begin']);
                     }
                 } catch (DBALException $e) {
-                    $this->getTimeTracker()->setTSlogMessage($e->getPrevious()->getMessage());
+                    $this->getTimeTracker()->setTSlogMessage($e->getMessage());
                     return '';
                 }
             }
@@ -5371,21 +5389,44 @@ class ContentObjectRenderer implements LoggerAwareInterface
 
     /**
      * Calculates the lifetime of a cache entry based on the given configuration
-     *
-     * @return int|null
      */
-    protected function calculateCacheLifetime(array $configuration)
+    protected function calculateCacheLifetime(array $configuration): ?int
     {
         $configuration['lifetime'] = $configuration['lifetime'] ?? '';
         $lifetimeConfiguration = (string)$this->stdWrapValue('lifetime', $configuration);
 
-        $lifetime = null; // default lifetime
+        $lifetime = null; // default lifetime of the cache backend. Can be configured via cache configuration options of the backend.
         if (strtolower($lifetimeConfiguration) === 'unlimited') {
-            $lifetime = 0; // unlimited
+            $lifetime = 0; // unlimited lifetime of the cache backend. Handled different in each cache backend. Some use 0 as unlimited, some use 1 year.
+        } elseif (strtolower($lifetimeConfiguration) === 'default') {
+            $lifetime = $this->getDefaultCachePeriod(); // default lifetime of config.cache_period or 86400 seconds
         } elseif ($lifetimeConfiguration > 0) {
-            $lifetime = (int)$lifetimeConfiguration; // lifetime in seconds
+            $lifetime = (int)$lifetimeConfiguration;
         }
         return $lifetime;
+    }
+
+    /**
+     * This methods converts the cache lifetime into a cache tag lifetime.
+     * This method handles the defaults of the cache backend in a single place
+     */
+    protected function calculateCacheTagLifetime(?int $lifetime): int
+    {
+        // If NULL is specified, the default lifetime is used. "0" means unlimited lifetime.
+        return match ($lifetime) {
+            0 => PHP_INT_MAX,
+            null => $this->getDefaultCachePeriod(),
+            default => $lifetime,
+        };
+    }
+
+    /**
+     * Returns the default cache period in seconds
+     */
+    protected function getDefaultCachePeriod(): int
+    {
+        $frontendTyposcript = $this->getRequest()->getAttribute('frontend.typoscript');
+        return (int)($frontendTyposcript->getConfigArray()['cache_period'] ?? 86400);
     }
 
     /**

@@ -337,6 +337,12 @@ class TypoScriptFrontendController implements LoggerAwareInterface
         if ($pageId !== $pageInformation->getContentFromPid()) {
             $cacheDataCollector->addCacheTags(new CacheTag('pageId_' . $this->contentPid, $lifetime));
         }
+
+        // Respect the translation page id on translated pages
+        if ((int)($pageRecord['_LOCALIZED_UID'] ?? 0) > 0) {
+            $cacheDataCollector->addCacheTags(new CacheTag('pageId_' . $pageRecord['_LOCALIZED_UID'], $lifetime));
+        }
+
         if (!empty($pageRecord['cache_tags'])) {
             $tags = GeneralUtility::trimExplode(',', $pageRecord['cache_tags'], true);
             array_walk($tags, fn(string $tag) => $cacheDataCollector->addCacheTags(new CacheTag($tag, $lifetime)));
@@ -819,7 +825,7 @@ class TypoScriptFrontendController implements LoggerAwareInterface
                 ($sendCacheHeadersForSharedCaches === 'auto' && $isBehindReverseProxy)
             ) {
                 $headers = [
-                    'Expires' => gmdate('D, d M Y H:i:s T', ($GLOBALS['EXEC_TIME'] + $lifetime)),
+                    'Expires' => gmdate('D, d M Y H:i:s T', (min($GLOBALS['EXEC_TIME'] + $lifetime, PHP_INT_MAX))),
                     'ETag' => '"' . md5($this->content) . '"',
                     // Do not cache for private caches, but store in shared caches
                     // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control#:~:text=Age%3A%20100-,s%2Dmaxage,-The%20s%2Dmaxage
@@ -828,7 +834,7 @@ class TypoScriptFrontendController implements LoggerAwareInterface
                 ];
             } elseif ($sendCacheHeadersToClient) {
                 $headers = [
-                    'Expires' => gmdate('D, d M Y H:i:s T', ($GLOBALS['EXEC_TIME'] + $lifetime)),
+                    'Expires' => gmdate('D, d M Y H:i:s T', (min($GLOBALS['EXEC_TIME'] + $lifetime, PHP_INT_MAX))),
                     'ETag' => '"' . md5($this->content) . '"',
                     'Cache-Control' => 'max-age=' . $lifetime,
                     'Pragma' => 'public',

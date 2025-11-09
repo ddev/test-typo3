@@ -240,7 +240,19 @@ abstract class AbstractUserAuthentication implements LoggerAwareInterface
     public function initializeUserSessionManager(?UserSessionManager $userSessionManager = null): void
     {
         $this->userSessionManager = $userSessionManager ?? UserSessionManager::create($this->loginType);
-        $this->userSession = $this->userSessionManager->createAnonymousSession();
+        $this->createAnonymousSession();
+    }
+
+    /**
+     * Creates an anonymous user session.
+     * This method should be avoided, as it is only a workaround due to the ugly setup of this class
+     * and the authentication / logout behavior.
+     */
+    public function createAnonymousSession(): void
+    {
+        if (!empty($this->userSessionManager)) {
+            $this->userSession = $this->userSessionManager->createAnonymousSession();
+        }
     }
 
     /**
@@ -278,7 +290,7 @@ abstract class AbstractUserAuthentication implements LoggerAwareInterface
         if ($this->shallSetSessionCookie()) {
             $this->setSessionCookie();
         }
-        // Hook for alternative ways of filling the $this->user array (is used by the "timtaw" extension)
+        // Hook for alternative ways of filling the $this->user array
         foreach ($GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_userauth.php']['postUserLookUp'] ?? [] as $funcName) {
             $_params = [
                 'pObj' => $this,
@@ -393,8 +405,7 @@ abstract class AbstractUserAuthentication implements LoggerAwareInterface
         // Active logout (eg. with "logout" button)
         if ($type === LoginType::LOGOUT) {
             if ($this->writeStdLog) {
-                // $type,$action,$error,$details_nr,$details,$data,$tablename,$recuid,$recpid
-                $this->writelog(SystemLogType::LOGIN, SystemLogLoginAction::LOGOUT, SystemLogErrorClassification::MESSAGE, 2, 'User %s logged out', [$this->user['username']], '', 0, 0);
+                $this->writelog(SystemLogType::LOGIN, SystemLogLoginAction::LOGOUT, SystemLogErrorClassification::MESSAGE, null, 'User %s logged out', [$this->user['username']], '', 0);
             }
             $this->logger->info('User logged out. Id: {session}', ['session' => sha1($this->userSession->getIdentifier())]);
             $this->logoff();
@@ -576,7 +587,7 @@ abstract class AbstractUserAuthentication implements LoggerAwareInterface
             if ($activeLogin) {
                 // User logged in - write that to the log!
                 if ($this->writeStdLog) {
-                    $this->writelog(SystemLogType::LOGIN, SystemLogLoginAction::LOGIN, SystemLogErrorClassification::MESSAGE, 1, 'User %s logged in from ###IP###', [$userRecordCandidate[$this->username_column]], '', '', '');
+                    $this->writelog(SystemLogType::LOGIN, SystemLogLoginAction::LOGIN, SystemLogErrorClassification::MESSAGE, null, 'User %s logged in from ###IP###', [$userRecordCandidate[$this->username_column]], '', '');
                 }
                 $this->logger->info('User {username} logged in from {ip}', [
                     'username' => $userRecordCandidate[$this->username_column],
@@ -800,7 +811,7 @@ abstract class AbstractUserAuthentication implements LoggerAwareInterface
                 // Delete any user set...
                 $this->logoff();
                 $userRecord = false;
-                $this->userSession = $this->userSessionManager->createAnonymousSession();
+                $this->createAnonymousSession();
             }
         }
         return is_array($userRecord) ? $userRecord : null;
@@ -848,7 +859,7 @@ abstract class AbstractUserAuthentication implements LoggerAwareInterface
         if ($this->userSession) {
             $this->userSessionManager->removeSession($this->userSession);
         }
-        $this->userSession = $this->userSessionManager->createAnonymousSession();
+        $this->createAnonymousSession();
         $this->user = null;
         if ($this->isCookieSet()) {
             $this->removeCookie();
@@ -1180,14 +1191,13 @@ abstract class AbstractUserAuthentication implements LoggerAwareInterface
      * @param int $type denotes which module that has submitted the entry. This is the current list:  1=tce_db; 2=tce_file; 3=system (eg. sys_history save); 4=modules; 254=Personal settings changed; 255=login / out action: 1=login, 2=logout, 3=failed login (+ errorcode 3), 4=failure_warning_email sent
      * @param int $action denotes which specific operation that wrote the entry (eg. 'delete', 'upload', 'update' and so on...). Specific for each $type. Also used to trigger update of the interface. (see the log-module for the meaning of each number !!)
      * @param int $error flag. 0 = message, 1 = error (user problem), 2 = System Error (which should not happen), 3 = security notice (admin)
-     * @param int $details_nr The message number. Specific for each $type and $action. in the future this will make it possible to translate error messages to other languages
+     * @param null $_ unused
      * @param string $details Default text that follows the message
      * @param array $data Data that follows the log. Might be used to carry special information. If an array the first 5 entries (0-4) will be sprintf'ed the details-text...
-     * @param string $tablename Special field used by tce_main.php. These ($tablename, $recuid, $recpid) holds the reference to the record which the log-entry is about. (Was used in attic status.php to update the interface.)
-     * @param int|string $recuid Special field used by tce_main.php. These ($tablename, $recuid, $recpid) holds the reference to the record which the log-entry is about. (Was used in attic status.php to update the interface.)
-     * @param int|string $recpid Special field used by tce_main.php. These ($tablename, $recuid, $recpid) holds the reference to the record which the log-entry is about. (Was used in attic status.php to update the interface.)
+     * @param string $tablename Special field used by tce_main.php. These ($tablename, $recuid) hold the reference to the record which the log-entry is about.
+     * @param int|string $recuid Special field used by tce_main.php. These ($tablename, $recuid) hold the reference to the record which the log-entry is about.
      */
-    public function writelog($type, $action, $error, $details_nr, $details, $data, $tablename, $recuid, $recpid) {}
+    public function writelog($type, $action, $error, $_, $details, $data, $tablename, $recuid) {}
 
     /**
      * Raw initialization of the be_user with uid=$uid

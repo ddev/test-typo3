@@ -7,13 +7,13 @@
 				<source>File Mounts</source>
 			</trans-unit>
 			<trans-unit id="file_mountpoints_edit_title">
-				<source>Edit filemount</source>
+				<source>Edit file mount</source>
 			</trans-unit>
 			<trans-unit id="file_mountpoints_add_title">
-				<source>Create new filemount</source>
+				<source>Create new file mount</source>
 			</trans-unit>
 			<trans-unit id="file_mountpoints_list_title">
-				<source>List filemounts</source>
+				<source>List file mounts</source>
 			</trans-unit>
 			<trans-unit id="db_mountpoints">
 				<source>DB Mounts</source>
@@ -142,10 +142,10 @@
 				<source>Unavailable Languages</source>
 			</trans-unit>
 			<trans-unit id="be_users.tabs.permissions">
-				<source>Permissions</source>
+				<source>Module Permissions</source>
 			</trans-unit>
 			<trans-unit id="be_users.tabs.mounts_and_workspaces">
-				<source>Mounts and Workspaces</source>
+				<source>Mounts</source>
 			</trans-unit>
 			<trans-unit id="be_users.tabs.options">
 				<source>Options</source>
@@ -205,7 +205,7 @@
 				<source>Module Permissions</source>
 			</trans-unit>
 			<trans-unit id="be_groups.tabs.mounts_and_workspaces">
-				<source>Mounts and Workspaces</source>
+				<source>Mounts</source>
 			</trans-unit>
 			<trans-unit id="be_groups.fileoper_perms">
 				<source>Fileoperation permissions</source>
@@ -394,7 +394,7 @@
 				<source>Backend usergroup</source>
 			</trans-unit>
 			<trans-unit id="sys_filemounts">
-				<source>Filemount</source>
+				<source>File mount</source>
 			</trans-unit>
 			<trans-unit id="sys_file_storage">
 				<source>File Storage</source>

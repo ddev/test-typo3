@@ -46,6 +46,8 @@ class ViewHelperInvoker
         }
         $argumentDefinitions = $viewHelperResolver->getArgumentDefinitionsForViewHelper($viewHelper);
 
+        // @todo make configurable with Fluid v5
+        $argumentProcessor = new LenientArgumentProcessor();
         try {
             // Convert nodes to actual values (in uncached context)
             $arguments = array_map(
@@ -56,7 +58,10 @@ class ViewHelperInvoker
             // Determine arguments defined by the ViewHelper API
             $registeredArguments = [];
             foreach ($argumentDefinitions as $argumentName => $argumentDefinition) {
-                $registeredArguments[$argumentName] = $arguments[$argumentName] ?? $argumentDefinition->getDefaultValue();
+                // @todo also perform argument validation here with Fluid v5, including check for required arguments
+                $registeredArguments[$argumentName] = isset($arguments[$argumentName])
+                    ? $argumentProcessor->process($arguments[$argumentName], $argumentDefinition)
+                    : $argumentDefinition->getDefaultValue();
                 unset($arguments[$argumentName]);
             }
 

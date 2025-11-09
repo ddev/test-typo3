@@ -46,4 +46,19 @@ final readonly class SelectRelationFieldType extends AbstractFieldType implement
     {
         return RelationshipType::fromTcaConfiguration($this->configuration);
     }
+
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
+    public function isNullable(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
+    }
 }

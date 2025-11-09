@@ -30,13 +30,12 @@ use TYPO3\CMS\Backend\Template\ModuleTemplate;
 use TYPO3\CMS\Backend\Template\ModuleTemplateFactory;
 use TYPO3\CMS\Backend\Utility\BackendUtility;
 use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
-use TYPO3\CMS\Core\Domain\Repository\PageRepository;
 use TYPO3\CMS\Core\Imaging\IconFactory;
 use TYPO3\CMS\Core\Imaging\IconSize;
 use TYPO3\CMS\Core\Localization\LanguageService;
 use TYPO3\CMS\Core\Page\PageRenderer;
+use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 use TYPO3\CMS\Core\Type\Bitmask\Permission;
-use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Info\Controller\Event\ModifyInfoModuleContentEvent;
 
 /**
@@ -63,6 +62,7 @@ class InfoModuleController
         protected readonly PageRenderer $pageRenderer,
         protected readonly ModuleTemplateFactory $moduleTemplateFactory,
         protected readonly EventDispatcherInterface $eventDispatcher,
+        protected readonly TcaSchemaFactory $tcaSchemaFactory,
     ) {}
 
     /**
@@ -124,23 +124,10 @@ class InfoModuleController
 
         if ($this->id) {
             // View
-            $pagesTSconfig = BackendUtility::getPagesTSconfig($this->pageinfo['uid']);
-            if (isset($pagesTSconfig['TCEMAIN.']['preview.']['disableButtonForDokType'])) {
-                $excludeDokTypes = GeneralUtility::intExplode(
-                    ',',
-                    (string)$pagesTSconfig['TCEMAIN.']['preview.']['disableButtonForDokType'],
-                    true
-                );
-            } else {
-                // exclude sysfolders and spacers by default
-                $excludeDokTypes = [
-                    PageRepository::DOKTYPE_SYSFOLDER,
-                    PageRepository::DOKTYPE_SPACER,
-                ];
-            }
-            if (!in_array((int)$this->pageinfo['doktype'], $excludeDokTypes, true)) {
+            $previewUriBuilder = PreviewUriBuilder::create($this->pageinfo);
+            if ($previewUriBuilder->isPreviewable()) {
                 // View page
-                $previewDataAttributes = PreviewUriBuilder::create((int)$this->pageinfo['uid'])
+                $previewDataAttributes = $previewUriBuilder
                     ->withRootLine(BackendUtility::BEgetRootLine($this->pageinfo['uid']))
                     ->buildDispatcherDataAttributes();
                 $viewButton = $buttonBar->makeLinkButton()
@@ -150,7 +137,7 @@ class InfoModuleController
                     ->setTitle($this->getLanguageService()->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.showPage'))
                     ->setIcon($this->iconFactory->getIcon('actions-view-page', IconSize::SMALL))
                     ->setShowLabelText(true);
-                $buttonBar->addButton($viewButton, ButtonBar::BUTTON_POSITION_LEFT);
+                $buttonBar->addButton($viewButton);
             }
         }
 

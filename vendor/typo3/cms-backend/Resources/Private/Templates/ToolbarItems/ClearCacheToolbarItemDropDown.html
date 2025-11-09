@@ -1,11 +1,11 @@
 <html xmlns:core="http://typo3.org/ns/TYPO3/CMS/Core/ViewHelpers" data-namespace-typo3-fluid="true">
-<p class="h3 dropdown-headline"><f:translate key="LLL:EXT:backend/Resources/Private/Language/locallang_toolbar.xlf:toolbarItems.clearCache" /></p>
+<p class="dropdown-headline"><f:translate key="LLL:EXT:backend/Resources/Private/Language/locallang_toolbar.xlf:toolbarItems.clearCache" /></p>
 <ul class="dropdown-list">
     <f:for each="{cacheActions}" as="cacheAction">
         <li>
             <a href="{cacheAction.href}" class="dropdown-item t3js-toolbar-cache-flush-action" aria-describedby="{cacheAction.id}-description">
                 <span class="dropdown-item-columns">
-                    <span class="dropdown-item-column dropdown-item-column-icon text-{cacheAction.severity}">
+                    <span class="dropdown-item-column dropdown-item-column-icon {f:if(condition: cacheAction.severity, then: 'text-{cacheAction.severity}')}">
                         <core:icon identifier="{cacheAction.iconIdentifier}" size="small" />
                     </span>
                     <span class="dropdown-item-column dropdown-item-column-text">

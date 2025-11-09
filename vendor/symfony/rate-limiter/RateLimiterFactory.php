@@ -24,7 +24,7 @@ use Symfony\Component\RateLimiter\Storage\StorageInterface;
 /**
  * @author Wouter de Jong <wouter@wouterj.nl>
  */
-final class RateLimiterFactory
+final class RateLimiterFactory implements RateLimiterFactoryInterface
 {
     private array $config;
 
@@ -53,7 +53,7 @@ final class RateLimiterFactory
         };
     }
 
-    protected static function configureOptions(OptionsResolver $options): void
+    private static function configureOptions(OptionsResolver $options): void
     {
         $intervalNormalizer = static function (Options $options, string $interval): \DateInterval {
             // Create DateTimeImmutable from unix timesatmp, so the default timezone is ignored and we don't need to
@@ -61,13 +61,13 @@ final class RateLimiterFactory
             $now = \DateTimeImmutable::createFromFormat('U', time());
 
             try {
-                $nowPlusInterval = @$now->modify('+' . $interval);
+                $nowPlusInterval = @$now->modify('+'.$interval);
             } catch (\DateMalformedStringException $e) {
-                throw new \LogicException(\sprintf('Cannot parse interval "%s", please use a valid unit as described on https://www.php.net/datetime.formats.relative.', $interval), 0, $e);
+                throw new \LogicException(\sprintf('Cannot parse interval "%s", please use a valid unit as described on https://php.net/datetime.formats#datetime.formats.relative', $interval), 0, $e);
             }
 
             if (!$nowPlusInterval) {
-                throw new \LogicException(\sprintf('Cannot parse interval "%s", please use a valid unit as described on https://www.php.net/datetime.formats.relative.', $interval));
+                throw new \LogicException(\sprintf('Cannot parse interval "%s", please use a valid unit as described on https://php.net/datetime.formats#datetime.formats.relative', $interval));
             }
 
             return $now->diff($nowPlusInterval);
@@ -82,7 +82,7 @@ final class RateLimiterFactory
             ->define('limit')->allowedTypes('int')
             ->define('interval')->allowedTypes('string')->normalize($intervalNormalizer)
             ->define('rate')
-                ->default(function (OptionsResolver $rate) use ($intervalNormalizer) {
+                ->options(function (OptionsResolver $rate) use ($intervalNormalizer) {
                     $rate
                         ->define('amount')->allowedTypes('int')->default(1)
                         ->define('interval')->allowedTypes('string')->normalize($intervalNormalizer)
