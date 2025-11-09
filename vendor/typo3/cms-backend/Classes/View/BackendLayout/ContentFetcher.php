@@ -178,7 +178,12 @@ class ContentFetcher
             if (!isset($languageTranslationInfo['hasTranslations'])) {
                 $languageTranslationInfo['hasTranslations'] = false;
             }
-            $languageTranslationInfo['untranslatedRecordUids'] = array_keys($untranslatedRecordUids);
+
+            $untranslatedRecordUidsWithoutWorkspaceDeletedRecords = $this->removeWorkspaceDeletedPlaceholdersUidsFromUntranslatedRecordUids(array_keys($untranslatedRecordUids), $language);
+            $languageTranslationInfo['untranslatedRecordUids'] = $untranslatedRecordUidsWithoutWorkspaceDeletedRecords;
+            if (array_keys($untranslatedRecordUids) !== $untranslatedRecordUidsWithoutWorkspaceDeletedRecords) {
+                $languageTranslationInfo['hasElementsWithWorkspaceDeletePlaceholders'] = true;
+            }
 
             // Check for inconsistent translations, force "mixed" mode and dispatch a FlashMessage to user if such a case is encountered.
             if (isset($languageTranslationInfo['hasStandAloneContent'])
@@ -206,6 +211,36 @@ class ContentFetcher
         return $languageTranslationInfo;
     }
 
+    protected function removeWorkspaceDeletedPlaceholdersUidsFromUntranslatedRecordUids(array $untranslatedRecordUids, int $language): array
+    {
+        if ($this->getBackendUser()->workspace <= 0) {
+            // Early return if we're not in a workspace to suppress some queries.
+            return $untranslatedRecordUids;
+        }
+        $queryBuilder = $this->getQueryBuilder();
+        $queryBuilder->andWhere(
+            $queryBuilder->expr()->and(
+                $queryBuilder->expr()->in(
+                    'l18n_parent',
+                    $queryBuilder->createNamedParameter($untranslatedRecordUids, Connection::PARAM_INT_ARRAY)
+                ),
+                $queryBuilder->expr()->eq(
+                    'sys_language_uid',
+                    $queryBuilder->createNamedParameter($language, Connection::PARAM_INT)
+                )
+            )
+        );
+        $result = $queryBuilder->executeQuery();
+        $uidsToRemoveFromUntranslatedRecordUids = [];
+        while ($row = $result->fetchAssociative()) {
+            BackendUtility::workspaceOL('tt_content', $row, -99, true);
+            if ($row && VersionState::tryFrom($row['t3ver_state'] ?? 0) === VersionState::DELETE_PLACEHOLDER) {
+                $uidsToRemoveFromUntranslatedRecordUids[] = $row['l18n_parent'];
+            }
+        }
+        return array_diff($untranslatedRecordUids, $uidsToRemoveFromUntranslatedRecordUids);
+    }
+
     protected function getQueryBuilder(): QueryBuilder
     {
         $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
@@ -228,7 +263,7 @@ class ContentFetcher
         $schema = GeneralUtility::makeInstance(TcaSchemaFactory::class)->get('tt_content');
         $sortBy = $schema->hasCapability(TcaSchemaCapability::SortByField) ? (string)$schema->getCapability(TcaSchemaCapability::SortByField) : '';
         if ($sortBy === '' && $schema->hasCapability(TcaSchemaCapability::DefaultSorting)) {
-            $sortBy = (string)$schema->getCapability(TcaSchemaCapability::DefaultSorting);
+            $sortBy = (string)$schema->getCapability(TcaSchemaCapability::DefaultSorting)->getValue();
         }
         foreach (QueryHelper::parseOrderBy($sortBy) as $orderBy) {
             $queryBuilder->addOrderBy($orderBy[0], $orderBy[1]);

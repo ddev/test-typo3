@@ -19,6 +19,7 @@ namespace TYPO3\CMS\Core\Schema;
 
 use TYPO3\CMS\Core\DataHandling\TableColumnType;
 use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
+use TYPO3\CMS\Core\Schema\Exception\InvalidSchemaTypeException;
 use TYPO3\CMS\Core\Schema\Exception\UndefinedFieldException;
 use TYPO3\CMS\Core\Schema\Exception\UndefinedSchemaException;
 use TYPO3\CMS\Core\Schema\Field\FieldCollection;
@@ -48,15 +49,13 @@ readonly class TcaSchema implements SchemaInterface
         return $this->name;
     }
 
-    public function getFields(...$fieldNames): FieldCollection
+    public function getFields(?callable $filterFunction = null): FieldCollection
     {
-        if ($fieldNames === []) {
+        if ($filterFunction === null) {
             return $this->fields;
         }
 
-        return new FieldCollection(
-            array_filter(iterator_to_array($this->fields), static fn(FieldTypeInterface $field): bool => in_array($field->getName(), $fieldNames, true))
-        );
+        return new FieldCollection(array_filter(iterator_to_array($this->fields), $filterFunction));
     }
 
     public function hasField(string $fieldName): bool
@@ -83,6 +82,15 @@ readonly class TcaSchema implements SchemaInterface
             }
             yield $field;
         }
+    }
+
+    public function getTitle(?callable $fn = null): string
+    {
+        // If a title is defined in the schema configuration, use it.
+        if (isset($this->schemaConfiguration['title']) && $fn) {
+            return $fn($this->schemaConfiguration['title']);
+        }
+        return $this->schemaConfiguration['title'] ?? '';
     }
 
     public function getRawConfiguration(): array
@@ -128,6 +136,7 @@ readonly class TcaSchema implements SchemaInterface
             TcaSchemaCapability::AccessAdminOnly => (bool)($this->schemaConfiguration['adminOnly'] ?? false),
             TcaSchemaCapability::AccessReadOnly => (bool)($this->schemaConfiguration['readOnly'] ?? false),
             TcaSchemaCapability::HideRecordsAtCopy => (bool)($this->schemaConfiguration['hideAtCopy'] ?? false),
+            TcaSchemaCapability::HideInUi => (bool)($this->schemaConfiguration['hideTable'] ?? false),
             TcaSchemaCapability::PrependLabelTextAtCopy => (bool)((string)($this->schemaConfiguration['prependAtCopy'] ?? '')),
             TcaSchemaCapability::RestrictionDisabledField => isset($this->schemaConfiguration['enablecolumns']['disabled']),
             TcaSchemaCapability::RestrictionStartTime => isset($this->schemaConfiguration['enablecolumns']['starttime']),
@@ -148,10 +157,16 @@ readonly class TcaSchema implements SchemaInterface
      *          : ($capability is TcaSchemaCapability::RestrictionStartTime ? Capability\FieldCapability
      *          : ($capability is TcaSchemaCapability::RestrictionEndTime ? Capability\FieldCapability
      *          : ($capability is TcaSchemaCapability::RestrictionUserGroup ? Capability\FieldCapability
+     *          : ($capability is TcaSchemaCapability::AccessReadOnly ? Capability\ScalarCapability
+     *          : ($capability is TcaSchemaCapability::AccessAdminOnly ? Capability\ScalarCapability
+     *          : ($capability is TcaSchemaCapability::HideRecordsAtCopy ? Capability\ScalarCapability
+     *          : ($capability is TcaSchemaCapability::HideInUi ? Capability\ScalarCapability
      *          : ($capability is TcaSchemaCapability::PrependLabelTextAtCopy ? Capability\ScalarCapability
+     *          : ($capability is TcaSchemaCapability::DefaultSorting ? Capability\ScalarCapability
      *          : ($capability is TcaSchemaCapability::Label ? Capability\LabelCapability
-     *          : Capability\SystemInternalFieldCapability))))))))))
-     */
+     *          : ($capability is TcaSchemaCapability::AncestorReferenceField ? Capability\SystemInternalFieldCapability
+     *          : Capability\SystemInternalFieldCapability))))))))))))))))
+ */
     public function getCapability(TcaSchemaCapability $capability): Capability\SchemaCapabilityInterface
     {
         return match ($capability) {
@@ -173,6 +188,7 @@ readonly class TcaSchema implements SchemaInterface
             TcaSchemaCapability::AccessAdminOnly => new Capability\ScalarCapability((bool)($this->schemaConfiguration['adminOnly'] ?? false)),
             TcaSchemaCapability::AccessReadOnly => new Capability\ScalarCapability((bool)($this->schemaConfiguration['readOnly'] ?? false)),
             TcaSchemaCapability::HideRecordsAtCopy => new Capability\ScalarCapability((bool)($this->schemaConfiguration['hideAtCopy'] ?? false)),
+            TcaSchemaCapability::HideInUi => new Capability\ScalarCapability((bool)($this->schemaConfiguration['hideTable'] ?? false)),
             TcaSchemaCapability::PrependLabelTextAtCopy => new Capability\ScalarCapability((string)($this->schemaConfiguration['prependAtCopy'] ?? '')),
             TcaSchemaCapability::RestrictionDisabledField => new Capability\FieldCapability($this->getField($this->schemaConfiguration['enablecolumns']['disabled'])),
             TcaSchemaCapability::RestrictionStartTime => new Capability\FieldCapability($this->getField($this->schemaConfiguration['enablecolumns']['starttime'])),
@@ -197,13 +213,6 @@ readonly class TcaSchema implements SchemaInterface
 
     protected function buildLabelCapability(): Capability\LabelCapability
     {
-        $additionalLabelFields = [];
-        if (isset($this->schemaConfiguration['label_alt'])) {
-            $additionalFieldNames = GeneralUtility::trimExplode(',', $this->schemaConfiguration['label_alt'], true);
-            foreach ($additionalFieldNames as $additionalFieldName) {
-                $additionalLabelFields[] = $this->fields[$additionalFieldName];
-            }
-        }
         $labelConfiguration = [];
         if (isset($this->schemaConfiguration['label_userFunc'])) {
             $labelConfiguration['generator'] = $this->schemaConfiguration['label_userFunc'];
@@ -214,8 +223,8 @@ readonly class TcaSchema implements SchemaInterface
             $labelConfiguration['formatterOptions'] = $this->schemaConfiguration['formattedLabel_userFunc_options'] ?? [];
         }
         return new Capability\LabelCapability(
-            $this->fields[$this->schemaConfiguration['label']],
-            $additionalLabelFields,
+            $this->schemaConfiguration['label'] ?? null,
+            array_unique(GeneralUtility::trimExplode(',', $this->schemaConfiguration['label_alt'] ?? '', true)),
             (bool)($this->schemaConfiguration['label_alt_force'] ?? false),
             $labelConfiguration
         );
@@ -238,6 +247,42 @@ readonly class TcaSchema implements SchemaInterface
     public function getSubSchemata(): SchemaCollection
     {
         return $this->subSchemata ?? new SchemaCollection([]);
+    }
+
+    public function supportsSubSchema(): bool
+    {
+        return isset($this->schemaConfiguration['type']);
+    }
+
+    public function getSubSchemaTypeInformation(): SchemaTypeInformation
+    {
+        $typeInformation = $this->schemaConfiguration['type'] ?? null;
+        if ($typeInformation === null) {
+            throw new InvalidSchemaTypeException('The schema "' . $this->name . '" has no type information.', 1749241443);
+        }
+        if (str_contains($typeInformation, ':')) {
+            [$localField, $foreignField] = explode(':', $typeInformation, 2);
+            if (!$this->fields->offsetExists($localField) || $this->fields[$localField] instanceof RelationalFieldTypeInterface === false) {
+                throw new InvalidSchemaTypeException('The schema "' . $this->name . '" defines a foreign field type "' . $typeInformation . '" but there is either no such local field "' . $localField . '" or the field is no relational field.', 1749241444);
+            }
+            $activeRelation = $this->fields[$localField]->getRelations()[0] ?? null;
+            if ($activeRelation instanceof ActiveRelation === false || $activeRelation->toTable() === '') {
+                throw new InvalidSchemaTypeException('The schema "' . $this->name . '" defines a foreign field type "' . $typeInformation . '" but the local field "' . $localField . '" does not provide a valid realtion.', 1749241445);
+            }
+            return new SchemaTypeInformation(
+                $this->getName(),
+                $localField,
+                $foreignField,
+                $activeRelation->toTable()
+            );
+        }
+        if (!$this->fields->offsetExists($typeInformation)) {
+            throw new InvalidSchemaTypeException('The schema "' . $this->name . '" defines a field type "' . $typeInformation . '" but there is no such field.', 1749241446);
+        }
+        return new SchemaTypeInformation(
+            $this->getName(),
+            $typeInformation,
+        );
     }
 
     public function getSubSchemaDivisorField(): ?FieldTypeInterface

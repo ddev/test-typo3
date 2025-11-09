@@ -25,6 +25,7 @@ use TYPO3\CMS\Core\Context\Context;
 use TYPO3\CMS\Core\Context\DateTimeAspect;
 use TYPO3\CMS\Core\Context\LanguageAspectFactory;
 use TYPO3\CMS\Core\Context\VisibilityAspect;
+use TYPO3\CMS\Core\Domain\DateTimeFactory;
 use TYPO3\CMS\Core\Domain\Repository\PageRepository;
 use TYPO3\CMS\Core\Routing\PageArguments;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
@@ -62,11 +63,7 @@ class PreviewSimulator implements MiddlewareInterface
                     ['code' => PageAccessFailureReasons::INVALID_PAGE_ARGUMENTS]
                 );
             }
-            if ($this->context->hasAspect('visibility')) {
-                $visibilityAspect = $this->context->getAspect('visibility');
-            } else {
-                $visibilityAspect = GeneralUtility::makeInstance(VisibilityAspect::class);
-            }
+            $visibilityAspect = $this->context->getAspect('visibility');
             // The preview flag is set if the current page turns out to be hidden
             $showHiddenPages = $this->checkIfPageIsHidden($pageArguments->getPageId(), $request);
             $rootlineRequiresPreviewFlag = $this->checkIfRootlineRequiresPreview($pageArguments->getPageId());
@@ -79,11 +76,10 @@ class PreviewSimulator implements MiddlewareInterface
                 $previewAspect = $this->context->getAspect('frontend.preview');
                 $isPreview = $previewAspect->isPreview() || $isPreview;
             }
-            $previewAspect = GeneralUtility::makeInstance(PreviewAspect::class, $isPreview);
-            $this->context->setAspect('frontend.preview', $previewAspect);
+            $this->context->setAspect('frontend.preview', new PreviewAspect($isPreview));
 
             if ($showHiddenPages || $rootlineRequiresPreviewFlag) {
-                $newAspect = GeneralUtility::makeInstance(VisibilityAspect::class, true, $visibilityAspect->includeHiddenContent(), $visibilityAspect->includeDeletedRecords());
+                $newAspect = new VisibilityAspect(true, $visibilityAspect->includeHiddenContent(), $visibilityAspect->includeDeletedRecords(), $visibilityAspect->includeScheduledRecords());
                 $this->context->setAspect('visibility', $newAspect);
             }
         }
@@ -91,6 +87,10 @@ class PreviewSimulator implements MiddlewareInterface
         return $handler->handle($request);
     }
 
+    /**
+     * Evaluate if the "extendToSubpages" flag was set on any of the previous ancestor pages,
+     * but be sure to not check for the current page itself.
+     */
     protected function checkIfRootlineRequiresPreview(int $pageId): bool
     {
         $rootlineUtility = GeneralUtility::makeInstance(RootlineUtility::class, $pageId, '', $this->context);
@@ -100,25 +100,20 @@ class PreviewSimulator implements MiddlewareInterface
         $hidden = false;
         try {
             $rootLine = $rootlineUtility->get();
-            $pageInfo = $pageRepository->getPage_noCheck($pageId);
-            // Only check rootline if the current page has not set extendToSubpages itself
-            // @see \TYPO3\CMS\Backend\Routing\PreviewUriBuilder::class
-            if (!(bool)($pageInfo['extendToSubpages'] ?? false)) {
-                // remove the current page from the rootline
-                array_shift($rootLine);
-                foreach ($rootLine as $page) {
-                    // Skip root node and pages which do not define extendToSubpages
-                    if ((int)($page['uid'] ?? 0) === 0 || !(bool)($page['extendToSubpages'] ?? false)) {
-                        continue;
-                    }
-                    $groupRestricted = (bool)(string)($page['fe_group'] ?? '');
-                    $timeRestricted = (int)($page['starttime'] ?? 0) || (int)($page['endtime'] ?? 0);
-                    $hidden = (int)($page['hidden'] ?? 0);
-                    // Stop as soon as a page in the rootline has extendToSubpages set
-                    break;
-                }
-            }
 
+            // Remove the current page from the rootline
+            array_shift($rootLine);
+            foreach ($rootLine as $page) {
+                // Skip root node and pages which do not define extendToSubpages
+                if ((int)($page['uid'] ?? 0) === 0 || !(bool)($page['extendToSubpages'] ?? false)) {
+                    continue;
+                }
+                $groupRestricted = (bool)(string)($page['fe_group'] ?? '');
+                $timeRestricted = (int)($page['starttime'] ?? 0) || (int)($page['endtime'] ?? 0);
+                $hidden = (int)($page['hidden'] ?? 0);
+                // Stop as soon as a page in the rootline has extendToSubpages set
+                break;
+            }
         } catch (\Exception) {
             // if the rootline cannot be resolved (404 because of delete placeholder in workspaces for example)
             // we do not want to fail here but rather continue handling the request to trigger the TSFE 404 handling
@@ -166,13 +161,7 @@ class PreviewSimulator implements MiddlewareInterface
 
         $GLOBALS['SIM_EXEC_TIME'] = $queryTime;
         $GLOBALS['SIM_ACCESS_TIME'] = $queryTime - $queryTime % 60;
-        $this->context->setAspect(
-            'date',
-            GeneralUtility::makeInstance(
-                DateTimeAspect::class,
-                (new \DateTimeImmutable())->setTimestamp($queryTime)
-            )
-        );
+        $this->context->setAspect('date', new DateTimeAspect(DateTimeFactory::createFromTimestamp($queryTime)));
         return true;
     }
 
@@ -189,7 +178,7 @@ class PreviewSimulator implements MiddlewareInterface
             return false;
         }
         $frontendUser = $request->getAttribute('frontend.user');
-        $frontendUser->user[$frontendUser->usergroup_column] = $simulateUserGroup;
+        $frontendUser->user[$frontendUser->usergroup_column] = (string)$simulateUserGroup;
         $frontendUser->userGroups[$simulateUserGroup] = [
             'uid' => $simulateUserGroup,
             'title' => '_PREVIEW_',

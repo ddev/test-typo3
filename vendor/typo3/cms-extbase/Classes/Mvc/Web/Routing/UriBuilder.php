@@ -412,6 +412,10 @@ class UriBuilder
             $prefixedControllerArguments = [$this->argumentPrefix => $controllerArguments];
         } elseif (!$isFrontend) {
             $prefixedControllerArguments = $controllerArguments;
+            // Backend UriBuilder needs the route, which usually maps to the "route" parameter, which can be
+            // found in "Configuration/Backend/Modules.php" as the main key - that is the actual base route
+            // for the backend module, which in Extbase-speak is called a "pluginName"
+            $prefixedControllerArguments['route'] = $pluginName;
         } else {
             $pluginNamespace = $this->extensionService->getPluginNamespace($extensionName, $pluginName);
             $prefixedControllerArguments = [$pluginNamespace => $controllerArguments];
@@ -596,6 +600,8 @@ class UriBuilder
                 }
             } elseif (is_array($argumentValue)) {
                 $arguments[$argumentKey] = $this->convertDomainObjectsToIdentityArrays($argumentValue);
+            } elseif ($argumentValue instanceof \UnitEnum) {
+                $arguments[$argumentKey] = $argumentValue->value ?? $argumentValue->name;
             }
         }
         return $arguments;

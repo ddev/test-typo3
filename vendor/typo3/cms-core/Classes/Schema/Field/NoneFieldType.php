@@ -29,8 +29,23 @@ final readonly class NoneFieldType extends AbstractFieldType
         return 'none';
     }
 
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
     public function getFormat(): FieldFormat
     {
         return FieldFormat::fromTcaConfiguration($this->configuration);
+    }
+
+    public function hasDefaultValue(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
     }
 }

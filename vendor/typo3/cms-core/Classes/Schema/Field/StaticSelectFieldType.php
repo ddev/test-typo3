@@ -31,6 +31,11 @@ final readonly class StaticSelectFieldType extends AbstractFieldType
         return 'select';
     }
 
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
     /**
      * @return SelectItem[]
      */
@@ -40,5 +45,10 @@ final readonly class StaticSelectFieldType extends AbstractFieldType
             static fn($item): SelectItem => SelectItem::fromTcaItemArray($item),
             $this->configuration['items']
         ) : [];
+    }
+
+    public function isNullable(): false
+    {
+        return false;
     }
 }

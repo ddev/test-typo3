@@ -1,6 +1,7 @@
 <?php
 
 use TYPO3\CMS\Backend\Controller;
+use TYPO3\CMS\Backend\Security\SudoMode\Access\AccessLifetime;
 
 /**
  * Definitions for routes provided by EXT:backend
@@ -16,6 +17,7 @@ return [
         'path' => '/resource/rename',
         'methods' => ['POST'],
         'target' => Controller\Resource\ResourceController::class . '::renameResourceAction',
+        'inheritAccessFromModule' => 'media_management',
     ],
 
     // Link resource
@@ -29,12 +31,14 @@ return [
     'file_process' => [
         'path' => '/file/process',
         'target' => Controller\File\FileController::class . '::processAjaxRequest',
+        'inheritAccessFromModule' => 'media_management',
     ],
 
     // Check if file exists
     'file_exists' => [
         'path' => '/file/exists',
         'target' => Controller\File\FileController::class . '::fileExistsInFolderAction',
+        'inheritAccessFromModule' => 'media_management',
     ],
 
     // Get details of a file reference in FormEngine
@@ -92,6 +96,7 @@ return [
     'site_configuration_inline_create' => [
         'path' => '/siteconfiguration/inline/create',
         'target' => Controller\SiteInlineAjaxController::class . '::newInlineChildAction',
+        'inheritAccessFromModule' => 'site_configuration',
     ],
 
     // Validate slug input
@@ -104,6 +109,7 @@ return [
     'site_configuration_inline_details' => [
         'path' => '/siteconfiguration/inline/details',
         'target' => Controller\SiteInlineAjaxController::class . '::openInlineChildAction',
+        'inheritAccessFromModule' => 'site_configuration',
     ],
 
     // Add a flex form section container
@@ -128,6 +134,12 @@ return [
     'page_tree_data' => [
         'path' => '/page/tree/fetchData',
         'target' => Controller\Page\TreeController::class . '::fetchDataAction',
+    ],
+
+    // Get rootline for page tree
+    'page_tree_rootline' => [
+        'path' => '/page/tree/fetchRootline',
+        'target' => Controller\Page\TreeController::class . '::fetchRootlineAction',
     ],
 
     // Get data for page tree
@@ -159,6 +171,12 @@ return [
         'path' => '/filestorage/tree/fetchData',
         'methods' => ['GET'],
         'target' => Controller\FileStorage\TreeController::class . '::fetchDataAction',
+    ],
+
+    // Get rootline for file storage tree
+    'filestorage_tree_rootline' => [
+        'path' => '/filestorage/tree/fetchRootline',
+        'target' => Controller\FileStorage\TreeController::class . '::fetchRootlineAction',
     ],
 
     // Get filtered data for filestorage tree
@@ -270,6 +288,10 @@ return [
     'mfa' => [
         'path' => '/mfa',
         'target' => Controller\MfaAjaxController::class . '::handleRequest',
+        'sudoMode' => [
+            'group' => 'mfa',
+            'lifetime' => AccessLifetime::medium,
+        ],
     ],
 
     // Render flash messages
@@ -332,12 +354,6 @@ return [
         'target' => \TYPO3\CMS\Core\Controller\IconController::class . '::getIcon',
     ],
 
-    // Get icon cache identifier
-    'icons_cache' => [
-        'path' => '/icons/cache',
-        'target' => \TYPO3\CMS\Core\Controller\IconController::class . '::getCacheIdentifier',
-    ],
-
     // Encode typolink parts on demand
     'link_browser_encodetypolink' => [
         'path' => '/link-browser/encode-typolink',
@@ -348,18 +364,21 @@ return [
     'page_languages' => [
         'path' => '/records/localize/get-languages',
         'target' => Controller\Page\LocalizationController::class . '::getUsedLanguagesInPage',
+        'inheritAccessFromModule' => 'web_layout',
     ],
 
     // Get summary of records to localize
     'records_localize_summary' => [
         'path' => '/records/localize/summary',
         'target' => Controller\Page\LocalizationController::class . '::getRecordLocalizeSummary',
+        'inheritAccessFromModule' => 'web_layout',
     ],
 
     // Localize the records
     'records_localize' => [
         'path' => '/records/localize',
         'target' => Controller\Page\LocalizationController::class . '::localizeRecords',
+        'inheritAccessFromModule' => 'web_layout',
     ],
 
     // column selector
@@ -395,6 +414,7 @@ return [
         'access' => 'systemMaintainer',
         'path' => '/security/csp/control',
         'target' => \TYPO3\CMS\Backend\Security\ContentSecurityPolicy\CspAjaxController::class . '::handleRequest',
+        'inheritAccessFromModule' => 'tools_csp',
     ],
 
     'sudo_mode_control' => [

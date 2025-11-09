@@ -76,7 +76,7 @@ class LogEntry
     /**
      * Timestamp when the log entry was written
      */
-    protected int $tstamp = 0;
+    protected \DateTimeInterface $tstamp;
 
     /**
      * Type code
@@ -92,11 +92,6 @@ class LogEntry
      * Level.
      */
     protected string $level = '';
-
-    /**
-     * Details number
-     */
-    protected int $detailsNumber = 0;
 
     /**
      * IP address of client
@@ -117,11 +112,6 @@ class LogEntry
      * This is only the UID and not the full workspace object for the same reason as in $beUserUid.
      */
     protected int $workspaceUid = 0;
-
-    /**
-     * New ID
-     */
-    protected string|int $newId = 0;
 
     public function getUid(): int
     {
@@ -180,7 +170,7 @@ class LogEntry
         return $this->details;
     }
 
-    public function getTstamp(): int
+    public function getTstamp(): \DateTimeInterface
     {
         return $this->tstamp;
     }
@@ -198,11 +188,6 @@ class LogEntry
     public function getLevel(): string
     {
         return $this->level;
-    }
-
-    public function getDetailsNumber(): int
-    {
-        return $this->detailsNumber;
     }
 
     public function getIp(): string
@@ -239,21 +224,11 @@ class LogEntry
         return $this->workspaceUid;
     }
 
-    /**
-     * Get new id
-     *
-     * @return string|int
-     */
-    public function getNewId()
-    {
-        return $this->newId;
-    }
-
     public static function createFromDatabaseRecord(array $row): self
     {
         $obj = new self();
         $obj->uid = $row['uid'] ?? $obj->uid;
-        $obj->tstamp = $row['tstamp'] ?? $obj->tstamp;
+        $obj->tstamp = new \DateTimeImmutable(date('Y-m-d\TH:i:s', $row['tstamp'] ?? 0));
         $obj->backendUserUid = $row['userid'] ?? $obj->backendUserUid;
         $obj->action = $row['action'] ?? $obj->action;
         $obj->recordUid = $row['recuid'] ?? $obj->recordUid;
@@ -262,12 +237,10 @@ class LogEntry
         $obj->error = $row['error'] ?? $obj->error;
         $obj->type = $row['type'] ?? $obj->type;
         $obj->details = $row['details'] ?? $obj->details;
-        $obj->detailsNumber = $row['details_nr'] ?? $obj->detailsNumber;
         $obj->ip = $row['IP'] ?? $obj->ip;
         $obj->logData = $row['log_data'] ?? $obj->logData;
         $obj->eventPid = $row['event_pid'] ?? $obj->eventPid;
         $obj->workspaceUid = $row['workspace'] ?? $obj->workspaceUid;
-        $obj->newId = $row['NEWid'] ?? $obj->newId;
         $obj->channel = $row['channel'] ?? $obj->channel;
         $obj->level = $row['level'] ?? $obj->level;
         return $obj;

@@ -35,6 +35,11 @@ final readonly class CategoryFieldType extends AbstractFieldType implements Rela
         return 'category';
     }
 
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
     public function getTreeConfiguration(): array
     {
         return $this->configuration['treeConfig'] ?? [];
@@ -48,5 +53,15 @@ final readonly class CategoryFieldType extends AbstractFieldType implements Rela
     public function getRelationshipType(): RelationshipType
     {
         return RelationshipType::fromTcaConfiguration($this->configuration);
+    }
+
+    public function isNullable(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
     }
 }

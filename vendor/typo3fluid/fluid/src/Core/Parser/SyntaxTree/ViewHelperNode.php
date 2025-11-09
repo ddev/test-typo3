@@ -13,12 +13,15 @@ use TYPO3Fluid\Fluid\Core\Compiler\TemplateCompiler;
 use TYPO3Fluid\Fluid\Core\Rendering\RenderingContextInterface;
 use TYPO3Fluid\Fluid\Core\ViewHelper\ArgumentDefinition;
 use TYPO3Fluid\Fluid\Core\ViewHelper\ViewHelperInterface;
+use TYPO3Fluid\Fluid\Core\ViewHelper\ViewHelperResolverDelegateInterface;
 
 /**
  * Node which will call a ViewHelper associated with this node.
  */
 class ViewHelperNode extends AbstractNode
 {
+    protected readonly string $namespace;
+    protected readonly string $name;
     protected string $viewHelperClassName;
 
     /**
@@ -27,6 +30,8 @@ class ViewHelperNode extends AbstractNode
     protected array $arguments = [];
 
     protected ViewHelperInterface $uninitializedViewHelper;
+
+    protected readonly ?ViewHelperResolverDelegateInterface $resolverDelegate;
 
     /**
      * @var ArgumentDefinition[]
@@ -41,16 +46,29 @@ class ViewHelperNode extends AbstractNode
      * @param string $identifier the name of the ViewHelper to render, inside the namespace provided.
      * @param NodeInterface[] $arguments Arguments of view helper - each value is a RootNode.
      */
-    public function __construct(RenderingContextInterface $renderingContext, string $namespace, string $identifier, array $arguments)
+    public function __construct(RenderingContextInterface $renderingContext, string $namespace, string $identifier, array $arguments = [])
     {
         $resolver = $renderingContext->getViewHelperResolver();
+        $this->namespace = $namespace;
+        $this->name = $identifier;
         $this->arguments = $arguments;
         $this->viewHelperClassName = $resolver->resolveViewHelperClassName($namespace, $identifier);
         $this->uninitializedViewHelper = $resolver->createViewHelperInstanceFromClassName($this->viewHelperClassName);
+        $this->resolverDelegate = $resolver->getResponsibleDelegate($namespace, $identifier);
         $this->uninitializedViewHelper->setViewHelperNode($this);
         // Note: RenderingContext required here though replaced later. See https://github.com/TYPO3Fluid/Fluid/pull/93
         $this->uninitializedViewHelper->setRenderingContext($renderingContext);
         $this->argumentDefinitions = $resolver->getArgumentDefinitionsForViewHelper($this->uninitializedViewHelper);
+    }
+
+    public function getNamespace(): string
+    {
+        return $this->namespace;
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
     }
 
     /**
@@ -80,38 +98,39 @@ class ViewHelperNode extends AbstractNode
         return $this->viewHelperClassName;
     }
 
+    public function getResolverDelegate(): ?ViewHelperResolverDelegateInterface
+    {
+        return $this->resolverDelegate;
+    }
+
+    /**
+     * @internal only for parser
+     * @param NodeInterface[] $arguments Arguments of view helper - each value is a RootNode.
+     */
+    public function setArguments(array $arguments): void
+    {
+        $this->arguments = $arguments;
+    }
+
     /**
      * @internal only needed for compiling templates
-     * @return NodeInterface[]
+     * @return array<NodeInterface|scalar> For simple values, an argument might also be scalar
+     *                                     because of Fluid's compiler optimizations
      */
     public function getArguments(): array
     {
         return $this->arguments;
     }
 
-    /**
-     * @internal only needed for compiling templates
-     */
-    public function getArgumentDefinition($argumentName): ?ArgumentDefinition
-    {
-        return $this->argumentDefinitions[$argumentName] ?? null;
-    }
-
     public function addChildNode(NodeInterface $childNode): void
     {
         parent::addChildNode($childNode);
+        /** @todo remove with Fluid v5 */
         $this->uninitializedViewHelper->setChildNodes($this->childNodes);
     }
 
     /**
      * Call the view helper associated with this object.
-     *
-     * First, it evaluates the arguments of the view helper.
-     *
-     * If the view helper implements \TYPO3Fluid\Fluid\Core\ViewHelper\ChildNodeAccessInterface,
-     * it calls setChildNodes(array childNodes) on the view helper.
-     *
-     * Afterward, checks that the view helper did not leave a variable lying around.
      *
      * @param RenderingContextInterface $renderingContext
      * @return mixed evaluated node after the view helper has been called. This can be of any type,

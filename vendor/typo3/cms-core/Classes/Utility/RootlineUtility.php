@@ -40,7 +40,7 @@ use TYPO3\CMS\Core\Versioning\VersionState;
 class RootlineUtility
 {
     // Note that having a nesting depth of 100 is quite high, but defined to be more on a "safe" side here. Main goal
-    // is to mitigate unforeseen recursion which are not covered by the anchestor guard (checking page uid in path).
+    // is to mitigate unforeseen recursion which are not covered by the ancestor guard (checking page uid in path).
     private const MAX_CTE_TRAVERSAL_LEVELS = 100;
 
     /** @internal */
@@ -580,7 +580,6 @@ class RootlineUtility
                     $queryBuilder->createNamedParameter($pageId, Connection::PARAM_INT)
                 )
             )
-            ->setMaxResults(1)
             ->executeQuery();
 
         $record = $statement->fetchAssociative();
@@ -723,7 +722,11 @@ class RootlineUtility
                 'cte.__CTE_LEVEL__',
             ]))
             ->from('cte')
-            ->orderBy('cte.__CTE_LEVEL__', 'DESC')
+            // It's important to traverse determined rootline records in the correct order, which means from the page
+            // record down to the rootpage. The recursive CTE builds up the CTE level starting from current record as
+            // level 1 and incrementing the level for each parent record, which means that we need to order by the
+            // level in ascending order (1, 2, 3, 4).
+            ->orderBy('cte.__CTE_LEVEL__', 'ASC')
             ->addOrderBy('cte.uid', 'ASC')
             ->innerJoin(
                 'cte',
@@ -775,8 +778,6 @@ class RootlineUtility
                 $mountPointParameter = !empty($this->parsedMountPointParameters) ? $this->mountPointParameter : '';
                 $rootlineUtility = GeneralUtility::makeInstance(self::class, $recordId, $mountPointParameter, $this->context);
                 $rootline = $rootlineUtility->get();
-                // Reverse sub-rootline again to process entries in correct order.
-                ksort($rootline);
                 foreach ($rootline as $rootlineRecord) {
                     $records[] = $rootlineRecord;
                 }
@@ -793,7 +794,10 @@ class RootlineUtility
             $records[] = $record;
 
         }
-        return $records;
+        // `$records` are build having the current record as first item. We need to revers it here to ensure correct
+        // rootline completion and indexing within `RootlineUtility::generateRootlineCache()`, which expects to have
+        // a record with `pid=0` as first item in the returned records. Note, that keys are not preserved on purpose.
+        return array_reverse($records);
     }
 
     /**
@@ -806,7 +810,7 @@ class RootlineUtility
         $expr = $cte->expr();
         $initial = $this->createQueryBuilder('pages');
         $initial->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
-        if ($workspaceId <= 0) {
+        if ($workspaceId === 0) {
             // Return simplified initial expression for live workspace resolving only.
             return $initial
                 ->selectLiteral(...array_values([
@@ -980,7 +984,7 @@ class RootlineUtility
         $expr = $cte->expr();
         $traversal = $this->createQueryBuilder('pages');
         $traversal->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
-        if ($workspaceId <= 0) {
+        if ($workspaceId === 0) {
             $traversal
                 ->selectLiteral(...array_values([
                     // data fields
@@ -1227,22 +1231,20 @@ class RootlineUtility
      */
     protected function getWorkspaceResolvedPageRecord(int $pageId, int $workspaceId): ?array
     {
-        $createForLiveWorkspace = ($workspaceId <= 0);
         $queryBuilder = $this->createQueryBuilder('pages');
         $queryBuilder->getRestrictions()->removeAll()->add(GeneralUtility::makeInstance(DeletedRestriction::class));
-        $fields = $this->getPagesFields();
-        if ($createForLiveWorkspace) {
-            // For live workspace only we can even more simplify this
+        if ($workspaceId === 0) {
+            // For live workspace only we can simplify this even more
             $queryBuilder
-                ->select(...array_values($fields))
+                ->select('*')
                 ->from('pages')
                 ->where(
                     $queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($pageId, Connection::PARAM_INT)),
-                    $queryBuilder->expr()->in('t3ver_wsid', $queryBuilder->createNamedParameter([0, $workspaceId], Connection::PARAM_INT_ARRAY)),
-                )
-                ->setMaxResults(1);
+                    $queryBuilder->expr()->eq('t3ver_wsid', $queryBuilder->createNamedParameter(0, Connection::PARAM_INT)),
+                );
             return $queryBuilder->executeQuery()->fetchAssociative() ?: null;
         }
+        $fields = $this->getPagesFields();
         $prefixedFields = array_filter($fields, static fn($value) => $value !== 'uid');
         array_walk(
             $prefixedFields,
@@ -1394,17 +1396,15 @@ class RootlineUtility
         return $row;
     }
 
+    /**
+     * Uses a two-layer cache to ensure that this check is really called VERY VERY SELDOM.
+     */
     protected function getPagesFields(): array
     {
-        $fieldNames = [];
-        $columns = GeneralUtility::makeInstance(ConnectionPool::class)
+        // SchemaInformation provides a 2-level cache (runtime and persisted), no need to cache this here in the class.
+        return GeneralUtility::makeInstance(ConnectionPool::class)
             ->getConnectionForTable('pages')
-            ->getSchemaInformation()->introspectTable('pages')
-            ->getColumns();
-        foreach ($columns as $column) {
-            $fieldNames[] = $column->getName();
-        }
-        return $fieldNames;
+            ->getSchemaInformation()->listTableColumnNames('pages');
     }
 
     protected function createQueryBuilder(string $tableName): QueryBuilder

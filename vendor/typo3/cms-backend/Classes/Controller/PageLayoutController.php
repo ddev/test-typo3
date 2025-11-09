@@ -51,6 +51,9 @@ use TYPO3\CMS\Core\Imaging\IconSize;
 use TYPO3\CMS\Core\Localization\LanguageService;
 use TYPO3\CMS\Core\Page\JavaScriptModuleInstruction;
 use TYPO3\CMS\Core\Page\PageRenderer;
+use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
+use TYPO3\CMS\Core\Schema\TcaSchema;
+use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 use TYPO3\CMS\Core\Site\Entity\SiteLanguage;
 use TYPO3\CMS\Core\Type\Bitmask\Permission;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
@@ -75,6 +78,7 @@ class PageLayoutController
 
     protected int $currentSelectedLanguage;
     protected array $MOD_MENU;
+    protected ?TcaSchema $schema = null;
 
     /**
      * @var SiteLanguage[]
@@ -93,6 +97,7 @@ class PageLayoutController
         protected readonly ModuleProvider $moduleProvider,
         protected readonly BackendLayoutRenderer $backendLayoutRenderer,
         protected readonly BackendLayoutView $backendLayoutView,
+        protected readonly TcaSchemaFactory $tcaSchemaFactory,
     ) {}
 
     protected function initialize(ServerRequestInterface $request): void
@@ -103,6 +108,7 @@ class PageLayoutController
         $this->pageinfo = BackendUtility::readPageAccess($this->id, $backendUser->getPagePermsClause(Permission::PAGE_SHOW));
         $this->availableLanguages = $request->getAttribute('site')->getAvailableLanguages($backendUser, false, $this->id);
         $this->pageRenderer->addInlineLanguageLabelFile('EXT:backend/Resources/Private/Language/locallang_layout.xlf');
+        $this->schema = $this->tcaSchemaFactory->get('pages');
     }
 
     /**
@@ -172,54 +178,69 @@ class PageLayoutController
     {
         $backendUser = $this->getBackendUser();
         $languageService = $this->getLanguageService();
+        $translations = [];
 
         // MENU-ITEMS:
         $this->MOD_MENU = [
             'function' => [
                 1 => $languageService->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.view.layout'),
-                2 => $languageService->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.view.language_comparison'),
             ],
             'language' => [
                 0 => isset($this->availableLanguages[0]) ? $this->availableLanguages[0]->getTitle() : $languageService->sL('LLL:EXT:backend/Resources/Private/Language/locallang_layout.xlf:m_default'),
-                // We need to add -1 (all) here so a possible -1 value will be allowed when calling
-                // moduleData->cleanUp(). Actually, this is only relevant if we are dealing with the
-                // "languages" mode, which however can only be safely determined, after the moduleData
-                // have been cleaned up => chicken and egg problem. We therefore remove the -1 item from
-                // the menu again, as soon as we are able to determine the requested mode.
-                // @todo Replace the whole "mode" handling with some more robust solution
-                -1 => $languageService->sL('LLL:EXT:core/Resources/Private/Language/locallang_mod_web_list.xlf:multipleLanguages'),
             ],
         ];
 
-        // First, select all localized page records on the current page.
-        // Each represents a possibility for a language on the page. Add these to language selector.
-        if ($this->id) {
-            // Compile language data for pid != 0 only. The language drop-down is not shown on pid 0
-            // since pid 0 can't be localized.
-            $pageTranslations = BackendUtility::getExistingPageTranslations($this->id);
-            foreach ($pageTranslations as $pageTranslation) {
-                $languageId = $pageTranslation[$GLOBALS['TCA']['pages']['ctrl']['languageField']];
-                if (isset($this->availableLanguages[$languageId])) {
-                    $this->MOD_MENU['language'][$languageId] = $this->availableLanguages[$languageId]->getTitle();
+        // Add language comparison mode for sites with multiple languages
+        if (count($this->availableLanguages) > 0) {
+            // Add all possible languages first for the cleanup to make sure we keep the selected language
+            // when the user switches between pages with/without translations
+            foreach ($this->availableLanguages as $language) {
+                $this->MOD_MENU['language'][$language->getLanguageId()] = $language->getTitle();
+            }
+
+            // First, select all localized page records on the current page.
+            // Each represents a possibility for a language on the page. Add these to the language selector.
+            if ($this->id) {
+                // Compile language data for pid != 0 only. The language drop-down is not shown on pid 0
+                // since pid 0 can't be localized.
+                $pageTranslations = BackendUtility::getExistingPageTranslations($this->id);
+                $languageField = $this->schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName();
+                foreach ($pageTranslations as $pageTranslation) {
+                    $languageId = $pageTranslation[$languageField];
+                    if (isset($this->availableLanguages[$languageId])) {
+                        $translations[] = $languageId;
+                    }
                 }
             }
+
+            // Add language comparison mode if translations are possible
+            $this->MOD_MENU['function'][2] = $languageService->sL('LLL:EXT:core/Resources/Private/Language/locallang_core.xlf:labels.view.language_comparison');
+            $this->MOD_MENU['language'][-1] = $languageService->sL('LLL:EXT:core/Resources/Private/Language/locallang_mod_web_list.xlf:multipleLanguages');
         }
-        // Clean up settings
+
+        // Cleanup settings
         if ($this->moduleData->cleanUp($this->MOD_MENU)) {
             $backendUser->pushModuleData($this->moduleData->getModuleIdentifier(), $this->moduleData->toArray());
         }
+
+        // Remove all languages from MOD_MENU, which have no page translations after cleanup
+        foreach ($this->MOD_MENU['language'] as $languageId => $language) {
+            if ($languageId > 0 && !in_array($languageId, $translations, true)) {
+                unset($this->MOD_MENU['language'][$languageId]);
+            }
+        }
+
+        if ($translations === []) {
+            // Remove -1 if we have no translations
+            unset($this->MOD_MENU['language'][-1]);
+
+            // No translations -> set module data for the current request to default language
+            $this->moduleData->set('language', 0);
+        }
+
         if ($backendUser->workspace !== 0) {
             // Show all elements in draft workspaces
             $this->moduleData->set('showHidden', true);
-        }
-        if ((int)$this->moduleData->get('function') !== 2) {
-            // Remove -1 (all) from the module menu if not "languages" mode
-            unset($this->MOD_MENU['language'][-1]);
-            // In case -1 (all) is still set as language, but we are no longer in
-            // "languages" mode, we fall back to the default, preventing an empty grid.
-            if ((int)$this->moduleData->get('language') === -1) {
-                $this->moduleData->set('language', 0);
-            }
         }
     }
 
@@ -233,16 +254,18 @@ class PageLayoutController
             ->removeAll()
             ->add(GeneralUtility::makeInstance(DeletedRestriction::class))
             ->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, $this->getBackendUser()->workspace));
+
+        $languageCapability = $this->schema->getCapability(TcaSchemaCapability::Language);
         $overlayRecord = $queryBuilder
             ->select('*')
             ->from('pages')
             ->where(
                 $queryBuilder->expr()->eq(
-                    $GLOBALS['TCA']['pages']['ctrl']['transOrigPointerField'],
+                    $languageCapability->getTranslationOriginPointerField()->getName(),
                     $queryBuilder->createNamedParameter($this->id, Connection::PARAM_INT)
                 ),
                 $queryBuilder->expr()->eq(
-                    $GLOBALS['TCA']['pages']['ctrl']['languageField'],
+                    $languageCapability->getLanguageField()->getName(),
                     $queryBuilder->createNamedParameter($languageId, Connection::PARAM_INT)
                 )
             )
@@ -584,22 +607,12 @@ class PageLayoutController
             return null;
         }
 
-        if (isset($tsConfig['TCEMAIN.']['preview.']['disableButtonForDokType'])) {
-            // Exclude doktypes, set via tsConfig
-            $excludeDokTypes = GeneralUtility::intExplode(',', (string)($tsConfig['TCEMAIN.']['preview.']['disableButtonForDokType'] ?? ''), true);
-        } else {
-            // Exclude default doktypes: sysfolders and spacers
-            $excludeDokTypes = [
-                PageRepository::DOKTYPE_SYSFOLDER,
-                PageRepository::DOKTYPE_SPACER,
-            ];
-        }
-
-        if (in_array((int)$this->pageinfo['doktype'], $excludeDokTypes, true)) {
+        $previewUriBuilder = PreviewUriBuilder::create($this->pageinfo);
+        if (!$previewUriBuilder->isPreviewable()) {
             return null;
         }
 
-        $previewDataAttributes = PreviewUriBuilder::create((int)$this->pageinfo['uid'])
+        $previewDataAttributes = $previewUriBuilder
             ->withRootLine(BackendUtility::BEgetRootLine($this->pageinfo['uid']))
             ->withLanguage($this->currentSelectedLanguage)
             ->buildDispatcherDataAttributes();
@@ -729,11 +742,12 @@ class PageLayoutController
                 )
             );
 
+        $languageField = $this->schema->getCapability(TcaSchemaCapability::Language)->getLanguageField()->getName();
         if ($this->currentSelectedLanguage === 0) {
             // Default language is active (in columns or language mode) - consider "all languages" and the default
             $queryBuilder->andWhere(
                 $queryBuilder->expr()->in(
-                    $GLOBALS['TCA']['tt_content']['ctrl']['languageField'],
+                    $languageField,
                     [-1, 0]
                 )
             );
@@ -742,7 +756,7 @@ class PageLayoutController
             // consider "all languages", the default and the translation
             $queryBuilder->andWhere(
                 $queryBuilder->expr()->in(
-                    $GLOBALS['TCA']['tt_content']['ctrl']['languageField'],
+                    $languageField,
                     [-1, 0, $queryBuilder->createNamedParameter($this->currentSelectedLanguage, Connection::PARAM_INT)]
                 )
             );
@@ -750,20 +764,20 @@ class PageLayoutController
             // Columns mode with any translation is active - consider "all languages" and the translation
             $queryBuilder->andWhere(
                 $queryBuilder->expr()->in(
-                    $GLOBALS['TCA']['tt_content']['ctrl']['languageField'],
+                    $languageField,
                     [-1, $queryBuilder->createNamedParameter($this->currentSelectedLanguage, Connection::PARAM_INT)]
                 )
             );
         }
 
-        if (!empty($GLOBALS['TCA']['tt_content']['ctrl']['enablecolumns']['disabled'])) {
+        if ($this->schema->hasCapability(TcaSchemaCapability::RestrictionDisabledField)) {
             $andWhere[] = $queryBuilder->expr()->neq(
-                $GLOBALS['TCA']['tt_content']['ctrl']['enablecolumns']['disabled'],
+                $this->schema->getCapability(TcaSchemaCapability::RestrictionDisabledField)->getFieldName(),
                 $queryBuilder->createNamedParameter(0, Connection::PARAM_INT)
             );
         }
-        if (!empty($GLOBALS['TCA']['tt_content']['ctrl']['enablecolumns']['starttime'])) {
-            $starttimeField = $GLOBALS['TCA']['tt_content']['ctrl']['enablecolumns']['starttime'];
+        if ($this->schema->hasCapability(TcaSchemaCapability::RestrictionStartTime)) {
+            $starttimeField = $this->schema->getCapability(TcaSchemaCapability::RestrictionStartTime)->getFieldName();
             $andWhere[] = $queryBuilder->expr()->and(
                 $queryBuilder->expr()->neq(
                     $starttimeField,
@@ -775,8 +789,8 @@ class PageLayoutController
                 )
             );
         }
-        if (!empty($GLOBALS['TCA']['tt_content']['ctrl']['enablecolumns']['endtime'])) {
-            $endtimeField = $GLOBALS['TCA']['tt_content']['ctrl']['enablecolumns']['endtime'];
+        if ($this->schema->hasCapability(TcaSchemaCapability::RestrictionEndTime)) {
+            $endtimeField = $this->schema->getCapability(TcaSchemaCapability::RestrictionEndTime)->getFieldName();
             $andWhere[] = $queryBuilder->expr()->and(
                 $queryBuilder->expr()->neq(
                     $endtimeField,
@@ -788,7 +802,7 @@ class PageLayoutController
                 )
             );
         }
-        if (!empty($andWhere)) {
+        if ($andWhere !== []) {
             $queryBuilder->andWhere(
                 $queryBuilder->expr()->or(...$andWhere)
             );
@@ -804,20 +818,27 @@ class PageLayoutController
      */
     protected function isPageEditable(int $languageId): bool
     {
-        if ($GLOBALS['TCA']['pages']['ctrl']['readOnly'] ?? false) {
+        if ($this->pageinfo === false || $this->pageinfo === []) {
+            return false;
+        }
+        if ($this->schema->hasCapability(TcaSchemaCapability::AccessReadOnly)) {
             return false;
         }
         $backendUser = $this->getBackendUser();
         if ($backendUser->isAdmin()) {
             return true;
         }
-        if ($GLOBALS['TCA']['pages']['ctrl']['adminOnly'] ?? false) {
+        if ($this->schema->hasCapability(TcaSchemaCapability::AccessAdminOnly)) {
             return false;
         }
-        return is_array($this->pageinfo)
-            && $this->pageinfo !== []
-            && !(bool)($this->pageinfo[$GLOBALS['TCA']['pages']['ctrl']['editlock'] ?? null] ?? false)
-            && $backendUser->doesUserHaveAccess($this->pageinfo, Permission::PAGE_EDIT)
+        $isEditLocked = false;
+        if ($this->schema->hasCapability(TcaSchemaCapability::EditLock)) {
+            $isEditLocked = $this->pageinfo[$this->schema->getCapability(TcaSchemaCapability::EditLock)->getFieldName()] ?? false;
+        }
+        if ($isEditLocked) {
+            return false;
+        }
+        return $backendUser->doesUserHaveAccess($this->pageinfo, Permission::PAGE_EDIT)
             && $backendUser->checkLanguageAccess($languageId)
             && $backendUser->check('tables_modify', 'pages');
     }
@@ -830,8 +851,14 @@ class PageLayoutController
         if ($this->getBackendUser()->isAdmin()) {
             return true;
         }
-        return !($this->pageinfo['editlock'] ?? false)
-            && $this->getBackendUser()->doesUserHaveAccess($this->pageinfo, Permission::CONTENT_EDIT)
+        $isEditLocked = false;
+        if ($this->schema->hasCapability(TcaSchemaCapability::EditLock)) {
+            $isEditLocked = $this->pageinfo[$this->schema->getCapability(TcaSchemaCapability::EditLock)->getFieldName()] ?? false;
+        }
+        if ($isEditLocked) {
+            return false;
+        }
+        return $this->getBackendUser()->doesUserHaveAccess($this->pageinfo, Permission::CONTENT_EDIT)
             && $this->getBackendUser()->check('tables_modify', 'tt_content')
             && $this->getBackendUser()->checkLanguageAccess($languageId);
     }
@@ -841,7 +868,8 @@ class PageLayoutController
      */
     protected function getTargetPageIfVisible(array $targetPage): array
     {
-        return !($targetPage['hidden'] ?? false) ? $targetPage : [];
+        $fieldName = $this->schema->getCapability(TcaSchemaCapability::RestrictionDisabledField)->getFieldName();
+        return !($targetPage[$fieldName] ?? false) ? $targetPage : [];
     }
 
     /**

@@ -26,6 +26,7 @@ use TYPO3\CMS\Core\Cache\Frontend\FrontendInterface;
 use TYPO3\CMS\Core\Context\Context;
 use TYPO3\CMS\Core\Core\Environment;
 use TYPO3\CMS\Core\Http\ApplicationType;
+use TYPO3\CMS\Core\Imaging\IconRegistry;
 use TYPO3\CMS\Core\Localization\LanguageServiceFactory;
 use TYPO3\CMS\Core\Localization\Locale;
 use TYPO3\CMS\Core\MetaTag\MetaTagManagerRegistry;
@@ -129,11 +130,13 @@ class PageRenderer implements SingletonInterface
         protected readonly MarkerBasedTemplateService $templateService,
         protected readonly MetaTagManagerRegistry $metaTagRegistry,
         protected readonly AssetRenderer $assetRenderer,
+        protected readonly AssetCollector $assetCollector,
         protected readonly ResourceCompressor $resourceCompressor,
         protected readonly RelativeCssPathFixer $relativeCssPathFixer,
         protected readonly LanguageServiceFactory $languageServiceFactory,
         protected readonly ResponseFactoryInterface $responseFactory,
         protected readonly StreamFactoryInterface $streamFactory,
+        protected readonly IconRegistry $iconRegistry,
     ) {
         $this->reset();
         $this->setMetaTag('name', 'generator', 'TYPO3 CMS');
@@ -148,12 +151,14 @@ class PageRenderer implements SingletonInterface
             switch ($var) {
                 case 'assetsCache':
                 case 'assetRenderer':
+                case 'assetCollector':
                 case 'templateService':
                 case 'resourceCompressor':
                 case 'relativeCssPathFixer':
                 case 'languageServiceFactory':
                 case 'responseFactory':
                 case 'streamFactory':
+                case 'iconRegistry':
                     break;
                 case 'nonce':
                     $this->setNonce(new ConsumableNonce($value));
@@ -187,6 +192,7 @@ class PageRenderer implements SingletonInterface
                 case 'languageServiceFactory':
                 case 'responseFactory':
                 case 'streamFactory':
+                case 'iconRegistry':
                     break;
                 case 'nonce':
                     if ($value instanceof ConsumableNonce) {
@@ -1045,7 +1051,7 @@ class PageRenderer implements SingletonInterface
      * Includes an ES6/ES11 compatible JavaScript module by
      * resolving the specifier to an import-mapped filename.
      *
-     * @param string $specifier Bare module identifier like @my/package/Filename.js
+     * @param string $specifier Bare module identifier like @my/package/filename.js
      */
     public function loadJavaScriptModule(string $specifier)
     {
@@ -1424,19 +1430,23 @@ class PageRenderer implements SingletonInterface
     {
         $out = '';
 
+        foreach ($this->assetCollector->getJavaScriptModules() as $module) {
+            $this->loadJavaScriptModule($module);
+        }
+
         // adds a nonce hint/work-around for lit-elements (which is only applied automatically in ShadowDOM)
         // see https://lit.dev/docs/api/ReactiveElement/#ReactiveElement.styles)
         if ($this->applyNonceHint && $this->nonce !== null) {
-            $out .= GeneralUtility::wrapJS(
-                sprintf('window.litNonce = %s;', GeneralUtility::quoteJSvalue($this->nonce->consume())),
-                ['nonce' => $this->nonce->consume()]
-            );
+            $this->javaScriptRenderer->addGlobalAssignment(['litNonce' => $this->nonce->consume()]);
         }
 
+        // @todo hookup with PSR-7 request/response
+        $sitePath = GeneralUtility::getIndpEnv('TYPO3_SITE_PATH');
+
+        $useNonce = $this->getApplicationType() === 'BE';
         $out .= $this->javaScriptRenderer->renderImportMap(
-            // @todo hookup with PSR-7 request/response and
-            GeneralUtility::getIndpEnv('TYPO3_SITE_PATH'),
-            $this->nonce
+            $sitePath,
+            $useNonce ? $this->nonce : null,
         );
 
         $this->loadJavaScriptLanguageStrings();
@@ -1444,6 +1454,7 @@ class PageRenderer implements SingletonInterface
             $noBackendUserLoggedIn = empty($GLOBALS['BE_USER']->user['uid']);
             $this->addAjaxUrlsToInlineSettings($noBackendUserLoggedIn);
             $this->addGlobalCSSUrlsToInlineSettings();
+            $this->inlineSettings['cache']['iconCacheIdentifier'] = sha1($this->iconRegistry->getBackendIconsCacheIdentifier());
         }
         $assignments = array_filter([
             'settings' => $this->inlineSettings,
@@ -1467,7 +1478,7 @@ class PageRenderer implements SingletonInterface
                 );
             }
         }
-        $out .= $this->javaScriptRenderer->render($this->nonce);
+        $out .= $this->javaScriptRenderer->render($this->nonce, $sitePath);
         return $out;
     }
 
@@ -1990,27 +2001,6 @@ class PageRenderer implements SingletonInterface
     }
 
     /**
-     * Processes a Javascript file dependent on the current context
-     *
-     * Adds the version number for Frontend, compresses the file for Backend
-     *
-     * @param string $filename Filename
-     * @return string New filename
-     */
-    protected function processJsFile($filename)
-    {
-        $filename = $this->getStreamlinedFileName($filename, false);
-        if ($this->getApplicationType() === 'FE') {
-            if ($this->compressJavascript) {
-                $filename = $this->resourceCompressor->compressJsFile($filename);
-            } else {
-                $filename = GeneralUtility::createVersionNumberedFilename($filename);
-            }
-        }
-        return $this->getAbsoluteWebPath($filename);
-    }
-
-    /**
      * This function acts as a wrapper to allow relative and paths starting with EXT: to be dealt with
      * in this very case to always return the absolute web path to be included directly before output.
      *
@@ -2184,17 +2174,19 @@ class PageRenderer implements SingletonInterface
             $tagAttributes['nonce'] = $this->nonce->consume();
         }
         $tagAttributes = array_merge($tagAttributes, $properties['tagAttributes'] ?? []);
-        return '<style ' . GeneralUtility::implodeAttributes($tagAttributes, true, true) . '>' . LF
-            . '/*<![CDATA[*/' . LF . '<!-- ' . LF
-            . $cssInlineFix
-            . '-->' . LF . '/*]]>*/' . LF . '</style>' . LF;
+        return $this->wrapInlineStyle($cssInlineFix, $tagAttributes);
     }
 
     protected function wrapInlineStyle(string $content, array $attributes = []): string
     {
+        $styleTag = "<style%s>\n%s\n</style>\n";
+        if ($this->docType !== DocType::html5 || $this->docType->isXmlCompliant()) {
+            $styleTag = "<style%s>\n/*<![CDATA[*/\n<!-- \n%s-->\n/*]]>*/\n</style>\n";
+        }
+
         $attributesList = GeneralUtility::implodeAttributes($attributes, true);
         return sprintf(
-            "<style%s>\n/*<![CDATA[*/\n<!-- \n%s-->\n/*]]>*/\n</style>\n",
+            $styleTag,
             $attributesList !== '' ? ' ' . $attributesList : '',
             $content
         );
@@ -2202,17 +2194,19 @@ class PageRenderer implements SingletonInterface
 
     protected function wrapInlineScript(string $content, array $attributes = []): string
     {
+        $scriptTag = "<script%s>\n%s\n</script>\n";
         // * Whenever HTML5 is used, remove the "text/javascript" type from the wrap
         //   since this is not needed and may lead to validation errors in the future.
         // * Whenever XHTML gets disabled, remove the "text/javascript" type from the wrap
         //   since this is not needed and may lead to validation errors in the future.
         if ($this->docType !== DocType::html5 || $this->docType->isXmlCompliant()) {
             $attributes['type'] = 'text/javascript';
+            $scriptTag = "<script%s>\n/*<![CDATA[*/\n%s/*]]>*/\n</script>\n";
         }
 
         $attributesList = GeneralUtility::implodeAttributes($attributes, true);
         return sprintf(
-            "<script%s>\n/*<![CDATA[*/\n%s/*]]>*/\n</script>\n",
+            $scriptTag,
             $attributesList !== '' ? ' ' . $attributesList : '',
             $content
         );

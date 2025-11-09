@@ -105,6 +105,13 @@ class ColumnMap
     private $childKeyFieldName;
 
     /**
+     * DataTime format (TCA "format" property). Allowed: "date", "datetime", "time", "timesec"
+     *
+     * @var string|null
+     */
+    private $dateTimeFormat;
+
+    /**
      * todo: Check if this property should support null. If not, set default value.
      * Alternative format for storing DataTime formats
      * (instead of using unix-time stamps). Allowed values
@@ -116,6 +123,8 @@ class ColumnMap
     private $dateTimeStorageFormat;
 
     private TableColumnType $type = TableColumnType::INPUT;
+
+    public bool $isNullable = false;
 
     /**
      * Constructs a Column Map
@@ -223,6 +232,16 @@ class ColumnMap
         return $this->childKeyFieldName;
     }
 
+    public function setDateTimeFormat(?string $dateTimeFormat): void
+    {
+        $this->dateTimeFormat = $dateTimeFormat;
+    }
+
+    public function getDateTimeFormat(): ?string
+    {
+        return $this->dateTimeFormat;
+    }
+
     public function setDateTimeStorageFormat(?string $dateTimeStorageFormat): void
     {
         $this->dateTimeStorageFormat = $dateTimeStorageFormat;
@@ -241,5 +260,15 @@ class ColumnMap
     public function getType(): TableColumnType
     {
         return $this->type;
+    }
+
+    public function setIsNullable(bool $isNullable): void
+    {
+        $this->isNullable = $isNullable;
+    }
+
+    public function isNullable(): bool
+    {
+        return $this->isNullable;
     }
 }

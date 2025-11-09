@@ -70,6 +70,25 @@ class PageRepository implements LoggerAwareInterface
     use LoggerAwareTrait;
 
     /**
+     * Named constants for "magic numbers" of the field doktype
+     */
+    public const DOKTYPE_DEFAULT = 1;
+    public const DOKTYPE_LINK = 3;
+    public const DOKTYPE_SHORTCUT = 4;
+    public const DOKTYPE_BE_USER_SECTION = 6;
+    public const DOKTYPE_MOUNTPOINT = 7;
+    public const DOKTYPE_SPACER = 199;
+    public const DOKTYPE_SYSFOLDER = 254;
+
+    /**
+     * Named constants for "magic numbers" of the field shortcut_mode
+     */
+    public const SHORTCUT_MODE_NONE = 0;
+    public const SHORTCUT_MODE_FIRST_SUBPAGE = 1;
+    public const SHORTCUT_MODE_RANDOM_SUBPAGE = 2;
+    public const SHORTCUT_MODE_PARENT_PAGE = 3;
+
+    /**
      * This is not the final clauses. There will normally be conditions for the
      * hidden, starttime and endtime fields as well. This is initialized in the init() function.
      */
@@ -91,25 +110,6 @@ class PageRepository implements LoggerAwareInterface
         '_ORIG_pid',
         '_SHORTCUT_ORIGINAL_PAGE_UID',
     ];
-
-    /**
-     * Named constants for "magic numbers" of the field doktype
-     */
-    public const DOKTYPE_DEFAULT = 1;
-    public const DOKTYPE_LINK = 3;
-    public const DOKTYPE_SHORTCUT = 4;
-    public const DOKTYPE_BE_USER_SECTION = 6;
-    public const DOKTYPE_MOUNTPOINT = 7;
-    public const DOKTYPE_SPACER = 199;
-    public const DOKTYPE_SYSFOLDER = 254;
-
-    /**
-     * Named constants for "magic numbers" of the field shortcut_mode
-     */
-    public const SHORTCUT_MODE_NONE = 0;
-    public const SHORTCUT_MODE_FIRST_SUBPAGE = 1;
-    public const SHORTCUT_MODE_RANDOM_SUBPAGE = 2;
-    public const SHORTCUT_MODE_PARENT_PAGE = 3;
 
     protected Context $context;
 
@@ -372,45 +372,33 @@ class PageRepository implements LoggerAwareInterface
         if ($languageAspect->doOverlays()) {
             $attempted = true;
             // Mixed = if nothing is available in the selected language, try the fallbacks
-            // Fallbacks work as follows:
+            // Fallbacks work as follows (happens in the actual methods):
             // 1. We have a default language record and then start doing overlays (= the basis for fallbacks)
             // 2. Check if the actual requested language version is available in the DB (language=3 = canadian-french)
             // 3. If not, we check the next language version in the chain (e.g. language=2 = french) and so forth until we find a record
             if ($languageAspect->getOverlayType() === LanguageAspect::OVERLAYS_MIXED) {
-                $languageChain = $this->getLanguageFallbackChain($languageAspect);
-                $languageChain = array_reverse($languageChain);
                 if ($table === 'pages') {
-                    $result = $this->getPageOverlay(
+                    $localizedRecord = $this->getPageOverlay(
                         $originalRow,
-                        new LanguageAspect($languageAspect->getId(), $languageAspect->getId(), LanguageAspect::OVERLAYS_MIXED, $languageChain)
+                        $languageAspect
                     );
-                    if (!empty($result)) {
-                        $localizedRecord = $result;
+                    if (empty($localizedRecord)) {
+                        $localizedRecord = $originalRow;
                     }
                 } else {
-                    $languageChain = array_merge($languageChain, [$languageAspect->getContentId()]);
                     // Loop through each (fallback) language and see if there is a record
-                    // However, we do not want to preserve the "originalRow", that's why we set the option to "OVERLAYS_ON"
-                    while (($languageId = array_pop($languageChain)) !== null) {
-                        $result = $this->getRecordOverlay(
-                            $table,
-                            $originalRow,
-                            new LanguageAspect($languageId, $languageId, LanguageAspect::OVERLAYS_ON)
-                        );
-                        // If an overlay is found, return it
-                        if (is_array($result)) {
-                            $localizedRecord = $result;
-                            $localizedRecord['_REQUESTED_OVERLAY_LANGUAGE'] = $languageAspect->getContentId();
-                            break;
-                        }
-                    }
+                    $localizedRecord = $this->getRecordOverlay(
+                        $table,
+                        $originalRow,
+                        $languageAspect
+                    );
                     if ($localizedRecord === null) {
                         // If nothing was found, we set the localized record to the originalRow to simulate
                         // that the default language is "kept" (we want fallback to default language).
                         // Note: Most installations might have "type=fallback" set but do not set the default language
                         // as fallback. In the future - once we want to get rid of the magic "default language",
                         // this needs to behave different, and the "pageNotFound" special handling within fallbacks should be removed
-                        // and we need to check explicitly on in_array(0, $languageAspect->getFallbackChain())
+                        // plus: we need to check explicitly on in_array(0, $languageAspect->getFallbackChain())
                         // However, getPageOverlay() a few lines above also returns the "default language page" as well.
                         $localizedRecord = $originalRow;
                     }
@@ -432,6 +420,9 @@ class PageRepository implements LoggerAwareInterface
             if ($table === 'pages' && $languageAspect->getId() > 0) {
                 $attempted = true;
                 $localizedRecord = $this->getPageOverlay($originalRow, $languageAspect);
+            } elseif ($table === 'sys_file_metadata') {
+                $attempted = true;
+                $localizedRecord = $this->getRecordOverlay($table, $originalRow, $languageAspect);
             }
         }
 
@@ -647,7 +638,12 @@ class PageRepository implements LoggerAwareInterface
 
     /**
      * Creates language-overlay for records in general (where translation is found
-     * in records from the same DB table)
+     * in records from the same DB table).
+     *
+     * Since TYPO3 v13, this also works for a LanguageAspect with OVERLAYS_OFF (= free mode). Why?
+     * Mainly because there are cases where we ALWAYS have a default language (sys_file_metadata),
+     * and the check for the overlays is done outside of this method. That's why this method should
+     * never be called directly (it is protected since v13 for this reason).
      *
      * The record receives a language overlay and a workspace overlay of the language overlay.
      *
@@ -657,11 +653,6 @@ class PageRepository implements LoggerAwareInterface
      */
     protected function getRecordOverlay(string $table, array $row, LanguageAspect $languageAspect): ?array
     {
-        // Early return when no overlays are needed
-        if ($languageAspect->getOverlayType() === LanguageAspect::OVERLAYS_OFF) {
-            return $row;
-        }
-
         $tableControl = $GLOBALS['TCA'][$table]['ctrl'] ?? [];
         $languageField = $tableControl['languageField'] ?? '';
         $transOrigPointerField = $tableControl['transOrigPointerField'] ?? '';
@@ -726,6 +717,7 @@ class PageRepository implements LoggerAwareInterface
             }
 
             $pid = $incomingRecordPid;
+            $languageUids = array_merge([$languageAspect->getContentId()], $this->getLanguageFallbackChain($languageAspect));
             // When inside a workspace, the already versioned $row of the default language is coming in
             // For moved versioned records, the PID MIGHT be different. However, the idea of this function is
             // to get the language overlay of the LIVE default record, and afterward get the versioned record
@@ -735,25 +727,38 @@ class PageRepository implements LoggerAwareInterface
             if (isset($row['_ORIG_pid']) && $this->hasTableWorkspaceSupport($table) && VersionState::tryFrom($row['t3ver_state'] ?? 0) === VersionState::MOVE_POINTER) {
                 $pid = $row['_ORIG_pid'];
             }
-            $olrow = $queryBuilder->select('*')
+            $overlayRows = $queryBuilder->select('*')
                 ->from($table)
                 ->where(
                     $queryBuilder->expr()->eq(
                         'pid',
                         $queryBuilder->createNamedParameter($pid, Connection::PARAM_INT)
                     ),
-                    $queryBuilder->expr()->eq(
+                    $queryBuilder->expr()->in(
                         $languageField,
-                        $queryBuilder->createNamedParameter($languageAspect->getContentId(), Connection::PARAM_INT)
+                        $queryBuilder->createNamedParameter($languageUids, Connection::PARAM_INT_ARRAY)
                     ),
                     $queryBuilder->expr()->eq(
                         $transOrigPointerField,
                         $queryBuilder->createNamedParameter($recordUid, Connection::PARAM_INT)
                     )
                 )
-                ->setMaxResults(1)
                 ->executeQuery()
-                ->fetchAssociative();
+                ->fetchAllAssociative();
+
+            $olrow = false;
+            if ($overlayRows !== []) {
+                // Note: The exact order of the $languageUid traversal is important
+                foreach ($languageUids as $languageId) {
+                    foreach ($overlayRows as $overlayRow) {
+                        if ((int)$overlayRow[$languageField] === $languageId) {
+                            // Found the requested language, stop searching
+                            $olrow = $overlayRow;
+                            break 2;
+                        }
+                    }
+                }
+            }
 
             $this->versionOL($table, $olrow);
             // Merge record content by traversing all fields:
@@ -770,7 +775,7 @@ class PageRepository implements LoggerAwareInterface
                     } elseif ($fN === 'uid') {
                         $row['_LOCALIZED_UID'] = (int)$olrow['uid'];
                         // will be overridden again outside of this method if there is a multi-level chain
-                        $row['_REQUESTED_OVERLAY_LANGUAGE'] = $olrow[$languageField];
+                        $row['_REQUESTED_OVERLAY_LANGUAGE'] = $languageAspect->getContentId();
                     }
                 }
                 return $row;
@@ -1486,7 +1491,7 @@ class PageRepository implements LoggerAwareInterface
      *
      * @param string $table Table name found in the $GLOBALS['TCA'] array
      * @param array $enableFieldsToIgnore Array where values (or keys) can be "disabled", "starttime", "endtime", "fe_group" (keys from "enablefields" in TCA) and if set they will make sure that part of the clause is not added. Thus disables the specific part of the clause. For previewing etc.
-     * @return CompositeExpression[] Constraints built up by the enableField controls
+     * @return array<string, CompositeExpression|string> Constraints built up by the enableField controls
      */
     public function getDefaultConstraints(string $table, array $enableFieldsToIgnore = [], ?string $tableAlias = null): array
     {
@@ -1695,45 +1700,47 @@ class PageRepository implements LoggerAwareInterface
                 ->executeQuery()
                 ->fetchAssociative();
         }
-        if ($wsAlt = $this->getWorkspaceVersionOfRecord($table, (int)$row['uid'], $fields, $bypassEnableFieldsCheck)) {
-            if (is_array($wsAlt)) {
-                $rowVersionState = VersionState::tryFrom($wsAlt['t3ver_state'] ?? 0);
-                if ($rowVersionState === VersionState::MOVE_POINTER) {
-                    // For move pointers, store the actual live PID in the _ORIG_pid
-                    // The only place where PID is actually different in a workspace
-                    $wsAlt['_ORIG_pid'] = $row['pid'];
-                }
-                // For versions of single elements or page+content, preserve online UID
-                // (this will produce true "overlay" of element _content_, not any references)
-                // For new versions there is no online counterpart
-                if ($rowVersionState !== VersionState::NEW_PLACEHOLDER) {
-                    $wsAlt['_ORIG_uid'] = $wsAlt['uid'];
-                }
-                $wsAlt['uid'] = $row['uid'];
-                // Changing input record to the workspace version alternative:
-                $row = $wsAlt;
-                // Unset record if it turned out to be deleted in workspace
-                if ($rowVersionState === VersionState::DELETE_PLACEHOLDER) {
-                    $row = false;
-                }
-                // Check if move-pointer in workspace (unless if a move-placeholder is the
-                // reason why it appears!):
-                // You have to specifically set $unsetMovePointers in order to clear these
-                // because it is normally a display issue if it should be shown or not.
-                if ($rowVersionState === VersionState::MOVE_POINTER && !$incomingRecordIsAMoveVersion && $unsetMovePointers) {
-                    // Unset record if it turned out to be deleted in workspace
-                    $row = false;
-                }
-            } else {
-                // No version found, then check if online version is dummy-representation
-                // Notice, that unless $bypassEnableFieldsCheck is TRUE, the $row is unset if
-                // enablefields for BOTH the version AND the online record deselects it. See
-                // note for $bypassEnableFieldsCheck
-                if ($wsAlt <= -1 || VersionState::tryFrom($row['t3ver_state'] ?? 0)->indicatesPlaceholder()) {
-                    // Unset record if it turned out to be "hidden"
-                    $row = false;
-                }
+        $wsAlt = $this->getWorkspaceVersionOfRecord($table, (int)$row['uid'], $fields, $bypassEnableFieldsCheck);
+        if (!$wsAlt) {
+            return;
+        }
+        if (is_array($wsAlt)) {
+            $rowVersionState = VersionState::tryFrom($wsAlt['t3ver_state'] ?? 0);
+            if ($rowVersionState === VersionState::MOVE_POINTER) {
+                // For move pointers, store the actual live PID in the _ORIG_pid
+                // The only place where PID is actually different in a workspace
+                $wsAlt['_ORIG_pid'] = $row['pid'];
             }
+            // For versions of single elements or page+content, preserve online UID
+            // (this will produce true "overlay" of element _content_, not any references)
+            // For new versions there is no online counterpart
+            if ($rowVersionState !== VersionState::NEW_PLACEHOLDER) {
+                $wsAlt['_ORIG_uid'] = $wsAlt['uid'];
+            }
+            $wsAlt['uid'] = $row['uid'];
+            // Changing input record to the workspace version alternative:
+            $row = $wsAlt;
+            // Unset record if it turned out to be deleted in workspace
+            if ($rowVersionState === VersionState::DELETE_PLACEHOLDER) {
+                $row = false;
+            }
+            // Check if move-pointer in workspace (unless if a move-placeholder is the
+            // reason why it appears!):
+            // You have to specifically set $unsetMovePointers in order to clear these
+            // because it is normally a display issue if it should be shown or not.
+            if ($rowVersionState === VersionState::MOVE_POINTER && !$incomingRecordIsAMoveVersion && $unsetMovePointers) {
+                // Unset record if it turned out to be deleted in workspace
+                $row = false;
+            }
+            return;
+        }
+        // No version found, then check if online version is dummy-representation
+        // Notice, that unless $bypassEnableFieldsCheck is TRUE, the $row is unset if
+        // enablefields for BOTH the version AND the online record deselects it. See
+        // note for $bypassEnableFieldsCheck
+        if ($wsAlt <= -1 || VersionState::tryFrom($row['t3ver_state'] ?? 0)->indicatesPlaceholder()) {
+            // Unset record if it turned out to be "hidden"
+            $row = false;
         }
     }
 
@@ -2116,7 +2123,7 @@ class PageRepository implements LoggerAwareInterface
         if ((int)$this->context->getPropertyFromAspect('workspace', 'id') > 0) {
             // Fetch overlay of page if in workspace and check if it is hidden
             $backupContext = clone $this->context;
-            $this->context->setAspect('visibility', GeneralUtility::makeInstance(VisibilityAspect::class));
+            $this->context->setAspect('visibility', new VisibilityAspect());
             $targetPage = $this->getWorkspaceVersionOfRecord('pages', (int)$page['uid']);
             // Also checks if the workspace version is NOT hidden but the live version is in fact still hidden
             $result = $targetPage === -1 || $targetPage === -2 || (is_array($targetPage) && $targetPage['hidden'] == 0 && $page['hidden'] == 1);

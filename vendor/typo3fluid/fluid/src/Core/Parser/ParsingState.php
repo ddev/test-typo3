@@ -9,20 +9,35 @@ declare(strict_types=1);
 
 namespace TYPO3Fluid\Fluid\Core\Parser;
 
+use TYPO3Fluid\Fluid\Core\Compiler\TemplateCompiler;
 use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\NodeInterface;
 use TYPO3Fluid\Fluid\Core\Parser\SyntaxTree\RootNode;
 use TYPO3Fluid\Fluid\Core\Rendering\RenderingContextInterface;
 use TYPO3Fluid\Fluid\Core\Variables\VariableProviderInterface;
+use TYPO3Fluid\Fluid\Core\ViewHelper\ArgumentDefinition;
 use TYPO3Fluid\Fluid\View;
 
 /**
  * Stores all information relevant for one parsing pass - that is, the root node,
  * and the current stack of open nodes (nodeStack) and a variable container used
  * for PostParseFacets.
+ *
+ * @internal
  */
 class ParsingState implements ParsedTemplateInterface
 {
     protected string $identifier;
+    protected string|NodeInterface|null $layoutName = null;
+
+    /**
+     * @var array<string, ArgumentDefinition>
+     */
+    protected array $argumentDefinitions = [];
+
+    /**
+     * @var string[]
+     */
+    protected array $availableSlots = [];
 
     /**
      * Root node reference
@@ -79,6 +94,38 @@ class ParsingState implements ParsedTemplateInterface
     }
 
     /**
+     * @return array<string, ArgumentDefinition>
+     */
+    public function getArgumentDefinitions(): array
+    {
+        return $this->argumentDefinitions;
+    }
+
+    /**
+     * @param array<string, ArgumentDefinition> $argumentDefinitions
+     */
+    public function setArgumentDefinitions(array $argumentDefinitions): void
+    {
+        $this->argumentDefinitions = $argumentDefinitions;
+    }
+
+    /**
+     * @return string[]
+     */
+    public function getAvailableSlots(): array
+    {
+        return $this->availableSlots;
+    }
+
+    /**
+     * @param string[] $availableSlots
+     */
+    public function setAvailableSlots(array $availableSlots): void
+    {
+        $this->availableSlots = $availableSlots;
+    }
+
+    /**
      * Render the parsed template with rendering context
      *
      * @param RenderingContextInterface $renderingContext The rendering context to use
@@ -107,6 +154,21 @@ class ParsingState implements ParsedTemplateInterface
     public function getNodeFromStack(): NodeInterface
     {
         return $this->nodeStack[count($this->nodeStack) - 1];
+    }
+
+    /**
+     * Checks if the specified node type exists in the current stack
+     *
+     * @param class-string $nodeType
+     */
+    public function hasNodeTypeInStack(string $nodeType): bool
+    {
+        foreach ($this->nodeStack as $node) {
+            if ($node instanceof $nodeType) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -144,7 +206,8 @@ class ParsingState implements ParsedTemplateInterface
      */
     public function hasLayout(): bool
     {
-        return $this->variableContainer->exists('layoutName');
+        // @todo remove fallback with Fluid v5
+        return isset($this->layoutName) || $this->variableContainer->exists(TemplateCompiler::LAYOUT_VARIABLE);
     }
 
     /**
@@ -154,10 +217,29 @@ class ParsingState implements ParsedTemplateInterface
      *
      * @throws View\Exception
      */
-    public function getLayoutName(RenderingContextInterface $renderingContext): string|null|NodeInterface
+    public function getLayoutName(RenderingContextInterface $renderingContext): ?string
     {
-        $layoutName = $this->variableContainer->get('layoutName');
-        return $layoutName instanceof RootNode ? $layoutName->evaluate($renderingContext) : $layoutName;
+        $layoutName = $this->getUnevaluatedLayoutName();
+        return $layoutName instanceof NodeInterface ? $layoutName->evaluate($renderingContext) : $layoutName;
+    }
+
+    /**
+     * @internal only to be used by TemplateCompiler
+     */
+    public function getUnevaluatedLayoutName(): NodeInterface|string|null
+    {
+        // @todo remove fallback with Fluid v5
+        if (!isset($this->layoutName) && $this->variableContainer->exists(TemplateCompiler::LAYOUT_VARIABLE)) {
+            trigger_error('Setting a template\'s layout with the variable "layoutName" is deprecated and will no longer work in Fluid v5. Use ParsingState->setLayoutName() instead.', E_USER_DEPRECATED);
+            $layoutName = $this->variableContainer->get(TemplateCompiler::LAYOUT_VARIABLE);
+            return !$layoutName instanceof NodeInterface && !is_null($layoutName) ? (string)$layoutName : $layoutName;
+        }
+        return $this->layoutName;
+    }
+
+    public function setLayoutName(string|NodeInterface|null $layoutName): void
+    {
+        $this->layoutName = $layoutName;
     }
 
     public function addCompiledNamespaces(RenderingContextInterface $renderingContext): void {}

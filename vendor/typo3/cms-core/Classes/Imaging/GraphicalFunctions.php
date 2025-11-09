@@ -192,6 +192,11 @@ class GraphicalFunctions
     protected int $webpQuality = 85;
 
     /**
+     * @var int<1, 100>
+     */
+    protected int $avifQuality = 85;
+
+    /**
      * Reads configuration information from $GLOBALS['TYPO3_CONF_VARS']['GFX']
      * and sets some values in internal variables.
      */
@@ -209,6 +214,9 @@ class GraphicalFunctions
                 $this->webpQuality = MathUtility::forceIntegerInRange($gfxConf['webp_quality'], 1, 101, $this->webpQuality);
             }
         }
+        if (isset($gfxConf['avif_quality'])) {
+            $this->avifQuality = MathUtility::forceIntegerInRange($gfxConf['avif_quality'], 1, 100, $this->avifQuality);
+        }
         $this->addFrameSelection = (bool)$gfxConf['processor_allowFrameSelection'];
         $this->imageFileExt = GeneralUtility::trimExplode(',', $gfxConf['imagefile_ext']);
 
@@ -219,6 +227,8 @@ class GraphicalFunctions
         if ($gfxConf['processor_effects']) {
             $this->cmds['jpg'] = $this->v5_sharpen(10);
             $this->cmds['jpeg'] = $this->v5_sharpen(10);
+            $this->cmds['webp'] = $this->v5_sharpen(10);
+            $this->cmds['avif'] = $this->v5_sharpen(10);
         }
         // Secures that images are not scaled up.
         $this->mayScaleUp = (bool)$gfxConf['processor_allowUpscaling'];
@@ -428,6 +438,9 @@ class GraphicalFunctions
                     $command .= ' -quality ' . $this->webpQuality;
                 }
             }
+        }
+        if ($targetFileExtension === 'avif' && !str_contains($command, '-quality')) {
+            $command .= ' -quality ' . $this->avifQuality;
         }
         // re-apply colorspace-setting for the resulting image so colors don't appear to dark (sRGB instead of RGB)
         if (!str_contains($command, '-colorspace')) {

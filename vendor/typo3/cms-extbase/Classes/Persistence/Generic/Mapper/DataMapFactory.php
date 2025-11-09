@@ -212,14 +212,11 @@ class DataMapFactory implements SingletonInterface
                 $dataMap->setTranslationOriginDiffSourceName($languageCapability->getDiffSourceField()->getName());
             }
         }
-        if ($schema->getSubSchemaDivisorField() !== null) {
-            $dataMap->setRecordTypeColumnName($schema->getSubSchemaDivisorField()->getName());
+        // @todo Limitation to local SubSchemaDivisorField, because this is a static context
+        if ($schema->supportsSubSchema() && !$schema->getSubSchemaTypeInformation()->isPointerToForeignFieldInForeignSchema()) {
+            $dataMap->setRecordTypeColumnName($schema->getSubSchemaTypeInformation()->getFieldName());
         }
-        if ($schema->hasCapability(TcaSchemaCapability::RestrictionRootLevel)) {
-            // @todo Evaluate if this is correct. We currently have to use canExistOnPages() to keep previous
-            //       behaviour, which is (bool)$rootlevel, so treating "-1" and "1" as TURE, and only 0 als FALSE.
-            $dataMap->setRootLevel($schema->getCapability(TcaSchemaCapability::RestrictionRootLevel)->canExistOnPages());
-        }
+        $dataMap->setRootLevel((bool)$schema->getCapability(TcaSchemaCapability::RestrictionRootLevel)->getRootLevelType());
         if (isset($schema->getRawConfiguration()['is_static'])) {
             $dataMap->setIsStatic($schema->getRawConfiguration()['is_static']);
         }

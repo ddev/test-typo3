@@ -122,6 +122,9 @@ class BackendController
             JavaScriptModuleInstruction::create('@typo3/backend/storage/persistent.js')
                 ->invoke('load', $backendUser->uc)
         );
+        $javaScriptRenderer->addJavaScriptModuleInstruction(
+            JavaScriptModuleInstruction::create('@typo3/backend/key-bindings.js')
+        );
         $javaScriptRenderer->addGlobalAssignment([
             'TYPO3' => [
                 'configuration' => [
@@ -138,17 +141,20 @@ class BackendController
         $pageRenderer->addInlineLanguageLabelFile('EXT:core/Resources/Private/Language/locallang_core.xlf');
         $pageRenderer->addInlineLanguageLabelFile('EXT:core/Resources/Private/Language/locallang_misc.xlf');
         $pageRenderer->addInlineLanguageLabelFile('EXT:backend/Resources/Private/Language/locallang_layout.xlf');
+        $pageRenderer->addInlineLanguageLabelFile('EXT:backend/Resources/Private/Language/locallang_settingseditor.xlf');
         $pageRenderer->addInlineLanguageLabelFile('EXT:core/Resources/Private/Language/locallang_mod_web_list.xlf');
         $pageRenderer->addInlineLanguageLabelFile('EXT:core/Resources/Private/Language/wizard.xlf');
 
         // @todo: We can not put this into the template since PageRendererViewHelper does not deal with namespace in addInlineSettings argument
         $pageRenderer->addInlineSetting('ShowItem', 'moduleUrl', (string)$this->uriBuilder->buildUriFromRoute('show_item'));
+        $pageRenderer->addInlineSetting('Resource', 'thumbnailUrl', (string)$this->uriBuilder->buildUriFromRoute('resource_request_thumbnail'));
         $pageRenderer->addInlineSetting('RecordHistory', 'moduleUrl', (string)$this->uriBuilder->buildUriFromRoute('record_history'));
         $pageRenderer->addInlineSetting('NewRecord', 'moduleUrl', (string)$this->uriBuilder->buildUriFromRoute('db_new'));
         $pageRenderer->addInlineSetting('FormEngine', 'moduleUrl', (string)$this->uriBuilder->buildUriFromRoute('record_edit'));
         $pageRenderer->addInlineSetting('RecordCommit', 'moduleUrl', (string)$this->uriBuilder->buildUriFromRoute('tce_db'));
         $pageRenderer->addInlineSetting('FileCommit', 'moduleUrl', (string)$this->uriBuilder->buildUriFromRoute('tce_file'));
         $pageRenderer->addInlineSetting('Clipboard', 'moduleUrl', (string)$this->uriBuilder->buildUriFromRoute('clipboard_process'));
+        $pageRenderer->addInlineSetting('Wizards', 'elementBrowserUrl', (string)$this->uriBuilder->buildUriFromRoute('wizard_element_browser'));
 
         // Needed for FormEngine manipulation (date picker)
         $formatter = new DateFormatter();

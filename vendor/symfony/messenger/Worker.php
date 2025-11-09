@@ -128,8 +128,6 @@ class Worker
                 // this should prevent multiple lower priority receivers from
                 // blocking too long before the higher priority are checked
                 if ($envelopeHandled) {
-                    gc_collect_cycles();
-
                     break;
                 }
             }
@@ -274,9 +272,9 @@ class Worker
             [$envelope, $transportName] = $unacks[$batchHandler];
             try {
                 $this->bus->dispatch($envelope->with(new FlushBatchHandlersStamp($force)));
-                $envelope = $envelope->withoutAll(NoAutoAckStamp::class);
                 unset($unacks[$batchHandler], $batchHandler);
             } catch (\Throwable $e) {
+                $envelope = $envelope->withoutAll(NoAutoAckStamp::class);
                 $this->acks[] = [$transportName, $envelope, $e];
             }
         }

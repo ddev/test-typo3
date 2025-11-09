@@ -79,6 +79,8 @@ editor:
         - textPartLanguage
         - highlight
         - highlight:greenMarker
+        - '|'
+        - fullscreen
 
     alignment:
       options:
@@ -124,6 +126,12 @@ editor:
         startIndex: true
         reversed: true
 
+    indentBlock:
+      classes:
+        - 'ps-2'
+        - 'ps-3'
+        - 'ps-4'
+
     language:
       textPartLanguage: [
         { title: 'English', languageCode: 'en' },
@@ -133,9 +141,9 @@ editor:
 
     highlight:
       options:
-        - { model: 'yellowMarker', class: 'marker-yellow', title: 'Yellow marker', type: 'marker', color: 'var(--ck-highlight-marker-yellow)' }
-        - { model: 'greenMarker', class: 'marker-green', title: 'Green marker', type: 'marker', color: 'var(--ck-highlight-marker-green)' }
-        - { model: 'redPen', class: 'pen-red', title: 'Red pen', type: 'pen', color: 'var(--ck-highlight-pen-red)' }
+        - { model: 'yellowMarker', class: 'marker-yellow', title: 'Yellow marker', type: 'marker', color: 'var(--ck-content--highlight-marker-yellow)' }
+        - { model: 'greenMarker', class: 'marker-green', title: 'Green marker', type: 'marker', color: 'var(--ck-content-highlight-marker-green)' }
+        - { model: 'redPen', class: 'pen-red', title: 'Red pen', type: 'pen', color: 'var(--ck-content-highlight-pen-red)' }
 
     mention:
       feeds:
@@ -155,3 +163,5 @@ editor:
       - { module: '@ckeditor/ckeditor5-language', exports: ['TextPartLanguage'] }
       - { module: '@ckeditor/ckeditor5-mention', exports: ['Mention'] }
       - { module: '@ckeditor/ckeditor5-highlight', exports: ['Highlight'] }
+      - { module: '@ckeditor/ckeditor5-list', exports: ['ListProperties'] }
+      - { module: '@ckeditor/ckeditor5-fullscreen', exports: [ 'Fullscreen' ] }

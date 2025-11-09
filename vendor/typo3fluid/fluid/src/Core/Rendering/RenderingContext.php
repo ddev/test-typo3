@@ -36,7 +36,7 @@ use TYPO3Fluid\Fluid\View\TemplatePaths;
 class RenderingContext implements RenderingContextInterface
 {
     /**
-     * @var ErrorHandlerInterface
+     * @var ErrorHandlerInterface|null
      */
     protected $errorHandler;
 
@@ -90,7 +90,7 @@ class RenderingContext implements RenderingContextInterface
     protected $templateCompiler;
 
     /**
-     * @var FluidCacheInterface
+     * @var FluidCacheInterface|null
      */
     protected $cache;
 
@@ -419,5 +419,16 @@ class RenderingContext implements RenderingContextInterface
     public function setControllerAction($action)
     {
         $this->controllerAction = $action;
+    }
+
+    public function __clone(): void
+    {
+        // Clone all properties that have references to rendering context
+        $this->setTemplateCompiler(clone $this->getTemplateCompiler());
+        $this->setTemplateParser(clone $this->getTemplateParser());
+        $this->setTemplateProcessors(array_map(
+            static fn(TemplateProcessorInterface $processor): TemplateProcessorInterface => clone $processor,
+            $this->getTemplateProcessors(),
+        ));
     }
 }

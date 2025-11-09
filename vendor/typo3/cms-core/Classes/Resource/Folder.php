@@ -18,7 +18,9 @@ namespace TYPO3\CMS\Core\Resource;
 use Psr\Http\Message\UploadedFileInterface;
 use TYPO3\CMS\Core\Resource\Enum\DuplicationBehavior;
 use TYPO3\CMS\Core\Resource\Exception\ExistingTargetFileNameException;
+use TYPO3\CMS\Core\Resource\Exception\ExistingTargetFolderException;
 use TYPO3\CMS\Core\Resource\Exception\InsufficientFolderAccessPermissionsException;
+use TYPO3\CMS\Core\Resource\Exception\InsufficientFolderWritePermissionsException;
 use TYPO3\CMS\Core\Resource\Exception\ResourcePermissionsUnavailableException;
 use TYPO3\CMS\Core\Resource\Search\FileSearchDemand;
 use TYPO3\CMS\Core\Resource\Search\Result\FileSearchResultInterface;
@@ -38,6 +40,16 @@ use TYPO3\CMS\Core\Utility\PathUtility;
  */
 class Folder implements FolderInterface
 {
+    /**
+     * Modes for filter usage in getFiles()/getFolders()
+     */
+    public const FILTER_MODE_NO_FILTERS = 0;
+    // Merge local filters into storage's filters
+    public const FILTER_MODE_USE_OWN_AND_STORAGE_FILTERS = 1;
+    // Only use the filters provided by the storage
+    public const FILTER_MODE_USE_STORAGE_FILTERS = 2;
+    // Only use the filters provided by the current class
+    public const FILTER_MODE_USE_OWN_FILTERS = 3;
     /**
      * The storage this folder belongs to.
      *
@@ -69,17 +81,6 @@ class Folder implements FolderInterface
     protected $fileAndFolderNameFilters = [];
 
     /**
-     * Modes for filter usage in getFiles()/getFolders()
-     */
-    public const FILTER_MODE_NO_FILTERS = 0;
-    // Merge local filters into storage's filters
-    public const FILTER_MODE_USE_OWN_AND_STORAGE_FILTERS = 1;
-    // Only use the filters provided by the storage
-    public const FILTER_MODE_USE_STORAGE_FILTERS = 2;
-    // Only use the filters provided by the current class
-    public const FILTER_MODE_USE_OWN_FILTERS = 3;
-
-    /**
      * Initialization of the folder
      *
      * @param string $identifier
@@ -107,7 +108,7 @@ class Folder implements FolderInterface
     public function getReadablePath($rootId = null)
     {
         if ($rootId === null) {
-            // Find first matching filemount and use that as root
+            // Find first matching file mount and use that as root
             foreach ($this->storage->getFileMounts() as $fileMount) {
                 if ($this->storage->isWithinFolder($fileMount['folder'], $this)) {
                     $rootId = $fileMount['folder']->getIdentifier();
@@ -362,6 +363,8 @@ class Folder implements FolderInterface
      *
      * @param string $folderName
      * @return Folder The new folder object
+     * @throws ExistingTargetFolderException
+     * @throws InsufficientFolderWritePermissionsException
      */
     public function createFolder($folderName)
     {

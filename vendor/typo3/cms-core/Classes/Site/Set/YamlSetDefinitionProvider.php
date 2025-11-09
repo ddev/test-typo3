@@ -20,9 +20,13 @@ namespace TYPO3\CMS\Core\Site\Set;
 use Symfony\Component\DependencyInjection\Attribute\Autoconfigure;
 use Symfony\Component\Yaml\Exception\ParseException;
 use Symfony\Component\Yaml\Yaml;
+use TYPO3\CMS\Core\Configuration\Loader\Exception\YamlParseException;
+use TYPO3\CMS\Core\Configuration\Loader\YamlFileLoader;
 use TYPO3\CMS\Core\Settings\CategoryDefinition;
+use TYPO3\CMS\Core\Settings\InvalidSettingDefinitionException;
 use TYPO3\CMS\Core\Settings\SettingDefinition;
-use TYPO3\CMS\Core\Settings\SettingsTypeRegistry;
+use TYPO3\CMS\Core\Settings\SettingDefinitionValidation;
+use TYPO3\CMS\Core\Utility\GeneralUtility;
 
 /**
  * @internal
@@ -30,12 +34,12 @@ use TYPO3\CMS\Core\Settings\SettingsTypeRegistry;
 #[Autoconfigure(public: true)]
 class YamlSetDefinitionProvider
 {
-    public function __construct(
-        protected readonly SettingsTypeRegistry $settingsTypeRegistry
-    ) {}
-
     /** @var array<string, SetDefinition> */
     protected array $sets = [];
+    public function __construct(
+        protected readonly SettingDefinitionValidation $settingDefinitionValidation,
+        protected readonly YamlFileLoader $yamlFileLoader,
+    ) {}
 
     /**
      * @return array<string, SetDefinition>
@@ -50,17 +54,19 @@ class YamlSetDefinitionProvider
         $this->sets[$set->name] = $set;
     }
 
-    public function get(\SplFileInfo $fileInfo): SetDefinition
+    public function get(\SplFileInfo $fileInfo, ?string $virtualSetPath = null): SetDefinition
     {
-        $filename = $fileInfo->getPathname();
+        $filename = GeneralUtility::fixWindowsFilePath($fileInfo->getPathname());
+        $path = dirname($filename);
+        $virtualSetPath ??= $path . '/';
         // No placeholders or imports processed on purpose
         // Use dependencies for shared sets
         try {
             $set = Yaml::parseFile($filename);
         } catch (ParseException $e) {
-            throw new InvalidSetException('Invalid set definition. Filename: ' . $filename, 1711024370, $e);
+            $source = $virtualSetPath . basename($filename);
+            throw new InvalidSetException('Failed to parse set definition from "' . $source . '": ' . $e->getMessage(), 1711024370, $e);
         }
-        $path = dirname($filename);
         $setName = $set['name'] ?? '';
 
         $settingsDefinitionsFile = $path . '/settings.definitions.yaml';
@@ -68,16 +74,18 @@ class YamlSetDefinitionProvider
             try {
                 $settingsDefinitions = Yaml::parseFile($settingsDefinitionsFile);
             } catch (ParseException $e) {
+                $source = $virtualSetPath . basename($settingsDefinitionsFile);
                 throw new InvalidSettingsDefinitionsException(
-                    'Invalid settings definition. Filename: ' . $settingsDefinitionsFile,
+                    'Invalid settings definition. Source: ' . $source,
                     1711024374,
                     $e,
                     $setName
                 );
             }
             if (!is_array($settingsDefinitions['settings'] ?? null)) {
+                $source = $virtualSetPath . basename($settingsDefinitionsFile);
                 throw new InvalidSettingsDefinitionsException(
-                    'Missing "settings" key in settings definitions. Filename: ' . $settingsDefinitionsFile,
+                    'Missing "settings" key in settings definitions. Source: ' . $source,
                     1711024378,
                     null,
                     $setName
@@ -90,82 +98,179 @@ class YamlSetDefinitionProvider
         $settingsFile = $path . '/settings.yaml';
         if (is_file($settingsFile)) {
             try {
-                $settings = Yaml::parseFile($settingsFile);
-            } catch (ParseException $e) {
-                throw new InvalidSettingsException('Invalid settings format. Filename: ' . $settingsFile, 1711024380, $e, $setName);
-            }
-            if (!is_array($settings)) {
-                throw new InvalidSettingsException('Invalid settings format. Filename: ' . $settingsFile, 1711024382, null, $setName);
+                // HEADS UP: YamlFileLoader::PROCESS_PLACEHOLDERS is omitted on purpose and MUST NOT be added.
+                // Site sets are intended to be self-contained and must not rely on implicit
+                // dependencies to global (environment) variables.
+                $settings = $this->yamlFileLoader->load($settingsFile, YamlFileLoader::PROCESS_IMPORTS | YamlFileLoader::ALLOW_EMPTY_FILE);
+            } catch (YamlParseException $e) {
+                $source = $virtualSetPath . basename($settingsFile);
+                throw new InvalidSettingsException('Invalid settings format. Source: ' . $source, 1711024380, $e, $setName);
             }
             $set['settings'] = $settings;
         }
 
         if (($set['labels'] ?? '') === '') {
-            $labelsFile = $path . '/labels.xlf';
-            if (is_file($labelsFile)) {
-                $set['labels'] = $labelsFile;
+            if (is_file($path . '/labels.xlf')) {
+                $set['labels'] = $virtualSetPath . 'labels.xlf';
             }
         }
 
-        return $this->createDefinition($set, $path);
+        return $this->createDefinition($set, $virtualSetPath);
     }
 
     protected function createDefinition(array $set, string $basePath): SetDefinition
     {
-        try {
-            $settingsDefinitions = [];
-            $labels = $set['labels'] ?? null;
-            unset($set['labels']);
+        $settingsDefinitions = [];
+        $labels = $set['labels'] ?? null;
+        unset($set['labels']);
 
+        if ($labels) {
+            $set['label'] ??= 'LLL:' . $labels . ':label';
+        }
+
+        foreach (($set['settingsDefinitions'] ?? []) as $setting => $options) {
             if ($labels) {
-                $set['label'] ??= 'LLL:' . $labels . ':label';
+                $options['label'] ??= 'LLL:' . $labels . ':settings.' . $setting;
+                $options['description'] ??= 'LLL:' . $labels . ':settings.description.' . $setting;
             }
-
-            foreach (($set['settingsDefinitions'] ?? []) as $setting => $options) {
-                if ($labels) {
-                    $options['label'] ??= 'LLL:' . $labels . ':settings.' . $setting;
-                    $options['description'] ??= 'LLL:' . $labels . ':settings.description.' . $setting;
-                }
-                try {
-                    $definition = new SettingDefinition(...[...['key' => $setting], ...$options]);
-                    if ($this->settingsTypeRegistry->has($definition->type)) {
-                        $type = $this->settingsTypeRegistry->get($definition->type);
-                        if (!$type->validate($definition->default, $definition)) {
-                            throw new InvalidSettingsDefinitionsException('Invalid default value for settings definition: ' . json_encode($options), 1732181102, null, $set['name'] ?? '');
-                        }
-                    } else {
-                        throw new InvalidSettingsDefinitionsException('Invalid settings type \'' . $definition->type . '\' for settings definition: ' . json_encode($options), 1732181103, null, $set['name'] ?? '');
-                    }
-                } catch (\Error $e) {
-                    throw new InvalidSettingsDefinitionsException('Invalid setting definition: ' . json_encode($options), 1702623312, $e, $set['name'] ?? '');
-                }
-                $settingsDefinitions[] = $definition;
+            $settingDefinitionData = [...['key' => $setting], ...$options];
+            try {
+                $definition = new SettingDefinition(...$settingDefinitionData);
+            } catch (\Error $e) {
+                throw new InvalidSettingsDefinitionsException(
+                    'Invalid setting definition "' . $setting . '": ' . json_encode($options) . ' – ' . $this->getObjectConstructionErrors($e, SettingDefinition::class, $settingDefinitionData),
+                    1702623312,
+                    $e,
+                    $set['name'] ?? ''
+                );
             }
-
-            $categoryDefinitions = [];
-            foreach (($set['categoryDefinitions'] ?? []) as $category => $options) {
-                if ($labels) {
-                    $options['label'] ??= 'LLL:' . $labels . ':categories.' . $category;
-                    $options['description'] ??= 'LLL:' . $labels . ':categories.description.' . $category;
-                }
-                try {
-                    $definition = new CategoryDefinition(...[...['key' => $category], ...$options]);
-                } catch (\Error $e) {
-                    throw new \Exception('Invalid category-category definition: ' . json_encode($options), 1702623313, $e);
-                }
-                $categoryDefinitions[] = $definition;
+            try {
+                $this->settingDefinitionValidation->validate($definition);
+            } catch (InvalidSettingDefinitionException $e) {
+                throw new InvalidSettingsDefinitionsException(
+                    $e->getMessage(),
+                    1752483401,
+                    $e,
+                    $set['name'] ?? ''
+                );
             }
+            $settingsDefinitions[] = $definition;
+        }
 
-            $setData = [
-                ...$set,
-                'settingsDefinitions' => $settingsDefinitions,
-                'categoryDefinitions' => $categoryDefinitions,
-            ];
-            $setData['typoscript'] ??= $basePath;
-            $setData['pagets'] ??= $basePath . '/page.tsconfig';
+        $categoryDefinitions = [];
+        foreach (($set['categoryDefinitions'] ?? []) as $category => $options) {
+            if ($labels) {
+                $options['label'] ??= 'LLL:' . $labels . ':categories.' . $category;
+                $options['description'] ??= 'LLL:' . $labels . ':categories.description.' . $category;
+            }
+            try {
+                $definition = new CategoryDefinition(...[...['key' => $category], ...$options]);
+            } catch (\Error $e) {
+                throw new InvalidCategoryDefinitionsException(
+                    'Invalid category definition "' . $category . '": ' . json_encode($options),
+                    1702623313,
+                    $e,
+                    $set['name'] ?? ''
+                );
+            }
+            $categoryDefinitions[] = $definition;
+        }
+
+        $setData = [
+            ...$set,
+            'settingsDefinitions' => $settingsDefinitions,
+            'categoryDefinitions' => $categoryDefinitions,
+        ];
+        $setData['typoscript'] ??= $basePath;
+        $setData['pagets'] ??= $basePath . 'page.tsconfig';
+        try {
             return new SetDefinition(...$setData);
         } catch (\Error $e) {
-            throw new \Exception('Invalid set definition: ' . json_encode($set), 1170859526, $e);
+            throw new InvalidSetException(
+                'Invalid set definition: ' . json_encode($set) . ' – ' . $this->getObjectConstructionErrors($e, SetDefinition::class, $setData),
+                1170859526,
+                $e,
+                $set['name'] ?? ''
+            );
         }
+    }
+
+    protected function getObjectConstructionErrors(
+        \Error $error,
+        string $className,
+        array $arguments,
+    ): string {
+        $reflection = new \ReflectionClass($className);
+        $constructor = $reflection->getConstructor();
+        $parameters = $constructor->getParameters();
+        $missingParameters = [];
+        $typeErrors = [];
+        foreach ($parameters as $parameter) {
+            if (isset($arguments[$parameter->name])) {
+                $value = $arguments[$parameter->name];
+                unset($arguments[$parameter->name]);
+                $type = $parameter->getType();
+                if (!$this->typeMatches($type, $value)) {
+                    $typeErrors[$parameter->name] = (string)$type;
+                }
+            } elseif (!$parameter->isDefaultValueAvailable()) {
+                $missingParameters[] = $parameter->name;
+            }
+        }
+
+        $errors = [];
+        if ($missingParameters !== []) {
+            $errors[] = 'Missing properties: ' . implode(', ', $missingParameters);
+        }
+        if ($arguments !== []) {
+            $errors[] = 'Invalid properties: ' . implode(', ', array_keys($arguments));
+        }
+        if ($typeErrors !== []) {
+            $errors[] = 'Invalid type: ' . implode(', ', array_keys($typeErrors));
+        }
+
+        if ($errors === []) {
+            return $error->getMessage();
+        }
+
+        return implode('; ', $errors);
+    }
+
+    protected function typeMatches(
+        \ReflectionType $type,
+        mixed $value
+    ): bool {
+        if ($type->allowsNull() && $value === null) {
+            return true;
+        }
+
+        if ($type instanceof \ReflectionUnionType) {
+            foreach ($type->getTypes() as $t) {
+                if ($this->typeMatches($t, $value)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if ($type instanceof \ReflectionIntersectionType) {
+            foreach ($type->getTypes() as $t) {
+                if (!$this->typeMatches($t, $value)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if ($type instanceof \ReflectionNamedType) {
+            $typeName = $type->getName();
+            $valueType = gettype($value);
+            if ($valueType === 'object') {
+                return is_subclass_of($value, $typeName);
+            }
+            return $valueType === $typeName;
+        }
+
+        return true;
     }
 }

@@ -26,4 +26,19 @@ final readonly class CheckboxFieldType extends AbstractFieldType
     {
         return 'check';
     }
+
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
+    public function isNullable(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
+    }
 }

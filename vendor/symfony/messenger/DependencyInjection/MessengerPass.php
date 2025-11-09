@@ -254,6 +254,7 @@ class MessengerPass implements CompilerPassInterface
             }
         }
 
+        $consumableReceiverNames = [];
         foreach ($container->findTaggedServiceIds('messenger.receiver') as $id => $tags) {
             $receiverClass = $this->getServiceClass($container, $id);
             if (!is_subclass_of($receiverClass, ReceiverInterface::class)) {
@@ -268,6 +269,9 @@ class MessengerPass implements CompilerPassInterface
                     if ($tag['is_failure_transport'] ?? false) {
                         $failureTransportsMap[$tag['alias']] = $receiverMapping[$id];
                     }
+                }
+                if (!isset($tag['is_consumable']) || false !== $tag['is_consumable']) {
+                    $consumableReceiverNames[] = $tag['alias'] ?? $id;
                 }
             }
         }
@@ -294,7 +298,7 @@ class MessengerPass implements CompilerPassInterface
                 $consumeCommandDefinition->replaceArgument(0, new Reference('messenger.routable_message_bus'));
             }
 
-            $consumeCommandDefinition->replaceArgument(4, array_values($receiverNames));
+            $consumeCommandDefinition->replaceArgument(4, $consumableReceiverNames);
             try {
                 $consumeCommandDefinition->replaceArgument(6, $busIds);
             } catch (OutOfBoundsException) {
@@ -333,7 +337,7 @@ class MessengerPass implements CompilerPassInterface
     {
         $container->setDefinition(
             $tracedBusId = 'debug.traced.'.$busId,
-            (new Definition(TraceableMessageBus::class, [new Reference($tracedBusId.'.inner')]))->setDecoratedService($busId)
+            (new Definition(TraceableMessageBus::class, [new Reference($tracedBusId.'.inner'), new Reference('profiler.is_disabled_state_checker', ContainerBuilder::IGNORE_ON_INVALID_REFERENCE)]))->setDecoratedService($busId)
         );
 
         $container->getDefinition('data_collector.messenger')->addMethodCall('registerBus', [$busId, new Reference($tracedBusId)]);

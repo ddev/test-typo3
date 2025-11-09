@@ -258,7 +258,7 @@ class Check implements CheckInterface
      */
     protected function checkPhpVersion()
     {
-        $minimumPhpVersion = '8.1.0';
+        $minimumPhpVersion = '8.2.0';
         $currentPhpVersion = PHP_VERSION;
         if (version_compare($currentPhpVersion, $minimumPhpVersion) < 0) {
             $this->messageQueue->enqueue(new FlashMessage(
@@ -603,7 +603,8 @@ class Check implements CheckInterface
                     . '* The PHP extension eaccelerator is known to break this if'
                     . ' it is compiled without --with-eaccelerator-doc-comment-inclusion flag.'
                     . ' This compile flag must be specified, otherwise TYPO3 CMS will not work.' . LF
-                    . 'For more information take a look in our documentation ' . Typo3Information::URL_OPCACHE . '.',
+                    . 'For more information take a look in our documentation ' .
+                    (new Typo3Information())->getDocsLink('t3coreapi:troubleshooting-php-troubleshooting-opcode') . '.',
                 'PHP Doc comment reflection broken',
                 ContextualFeedbackSeverity::ERROR
             ));
@@ -671,7 +672,6 @@ class Check implements CheckInterface
         if (function_exists('imagecreatetruecolor')) {
             $imageResource = @imagecreatetruecolor(50, 100);
             if ($this->checkImageResource($imageResource)) {
-                imagedestroy($imageResource);
                 $this->messageQueue->enqueue(new FlashMessage(
                     '',
                     'PHP GD library true color works'
@@ -705,7 +705,6 @@ class Check implements CheckInterface
             // Do not use data:// wrapper to be independent of allow_url_fopen
             $imageResource = @imagecreatefromgif(__DIR__ . '/../../Resources/Public/Images/TestInput/Test.gif');
             if ($this->checkImageResource($imageResource)) {
-                imagedestroy($imageResource);
                 $this->messageQueue->enqueue(new FlashMessage(
                     '',
                     'PHP GD library has gif support'
@@ -760,7 +759,6 @@ class Check implements CheckInterface
             // Do not use data:// wrapper to be independent of allow_url_fopen
             $imageResource = @imagecreatefrompng(__DIR__ . '/../../Resources/Public/Images/TestInput/Test.png');
             if ($this->checkImageResource($imageResource)) {
-                imagedestroy($imageResource);
                 $this->messageQueue->enqueue(new FlashMessage(
                     '',
                     'PHP GD library has png support'

@@ -35,6 +35,11 @@ final readonly class GroupFieldType extends AbstractFieldType implements Relatio
         return 'group';
     }
 
+    public function isNullable(): false
+    {
+        return false;
+    }
+
     public function getRelations(): array
     {
         return $this->relations;
@@ -43,5 +48,15 @@ final readonly class GroupFieldType extends AbstractFieldType implements Relatio
     public function getRelationshipType(): RelationshipType
     {
         return RelationshipType::fromTcaConfiguration($this->configuration);
+    }
+
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
     }
 }

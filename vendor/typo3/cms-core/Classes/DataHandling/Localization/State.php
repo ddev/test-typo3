@@ -17,6 +17,8 @@ declare(strict_types=1);
 
 namespace TYPO3\CMS\Core\DataHandling\Localization;
 
+use TYPO3\CMS\Core\Schema\Field\FieldTypeInterface;
+use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 
 /**
@@ -27,6 +29,15 @@ class State
     public const STATE_CUSTOM = 'custom';
     public const STATE_PARENT = 'parent';
     public const STATE_SOURCE = 'source';
+
+    protected string $tableName;
+    protected array $states;
+    protected array $originalStates;
+    protected array $validStates = [
+        self::STATE_CUSTOM,
+        self::STATE_SOURCE,
+        self::STATE_PARENT,
+    ];
 
     public static function create(string $tableName): ?State
     {
@@ -56,12 +67,10 @@ class State
 
     public static function isApplicable(string $tableName): bool
     {
-        return
-            static::hasColumns($tableName)
-            && static::hasLanguageFieldName($tableName)
-            && static::hasTranslationParentFieldName($tableName)
-            && count(static::getFieldNames($tableName)) > 0
-        ;
+        $schemaFactory = GeneralUtility::makeInstance(TcaSchemaFactory::class);
+        return $schemaFactory->has($tableName)
+            && $schemaFactory->get($tableName)->isLanguageAware()
+            && count(static::getFieldNames($tableName)) > 0;
     }
 
     /**
@@ -69,45 +78,20 @@ class State
      */
     public static function getFieldNames(string $tableName): array
     {
-        return array_keys(
-            array_filter(
-                $GLOBALS['TCA'][$tableName]['columns'] ?? [],
-                static function (array $fieldConfiguration): bool {
-                    return !empty(
-                        $fieldConfiguration['config']
-                            ['behaviour']['allowLanguageSynchronization']
-                    );
-                }
+        $schemaFactory = GeneralUtility::makeInstance(TcaSchemaFactory::class);
+        if (!$schemaFactory->has($tableName)) {
+            return [];
+        }
+
+        return array_map(
+            static fn(FieldTypeInterface $field) => $field->getName(),
+            iterator_to_array(
+                $schemaFactory->get($tableName)->getFields(
+                    static fn(FieldTypeInterface $field): bool => !empty($field->getConfiguration()['behaviour']['allowLanguageSynchronization'])
+                )
             )
         );
     }
-
-    protected static function hasColumns(string $tableName): bool
-    {
-        return
-            !empty($GLOBALS['TCA'][$tableName]['columns'])
-            && is_array($GLOBALS['TCA'][$tableName]['columns'])
-        ;
-    }
-
-    protected static function hasLanguageFieldName(string $tableName): bool
-    {
-        return !empty($GLOBALS['TCA'][$tableName]['ctrl']['languageField']);
-    }
-
-    protected static function hasTranslationParentFieldName(string $tableName): bool
-    {
-        return !empty($GLOBALS['TCA'][$tableName]['ctrl']['transOrigPointerField']);
-    }
-
-    protected string $tableName;
-    protected array $states;
-    protected array $originalStates;
-    protected array $validStates = [
-        self::STATE_CUSTOM,
-        self::STATE_SOURCE,
-        self::STATE_PARENT,
-    ];
 
     public function __construct(string $tableName, array $states = [])
     {
@@ -152,7 +136,7 @@ class State
 
     public function toArray(): array
     {
-        return $this->states ?? [];
+        return $this->states;
     }
 
     /**

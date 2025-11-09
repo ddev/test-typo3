@@ -10,13 +10,4 @@
  *
  * The TYPO3 project - inspiring people to share!
  */
-var __decorate=function(e,t,r,o){var n,l=arguments.length,p=l<3?t:null===o?o=Object.getOwnPropertyDescriptor(t,r):o;if("object"==typeof Reflect&&"function"==typeof Reflect.decorate)p=Reflect.decorate(e,t,r,o);else for(var a=e.length-1;a>=0;a--)(n=e[a])&&(p=(l<3?n(p):l>3?n(t,r,p):n(t,r))||p);return l>3&&p&&Object.defineProperty(t,r,p),p};import{html}from"lit";import{customElement,property}from"lit/decorators.js";import{BaseElement}from"@typo3/backend/settings/type/base.js";export const componentName="typo3-backend-settings-type-int";let IntTypeElement=class extends BaseElement{render(){return html`
-      <input
-        type="number"
-        id=${this.formid}
-        class="form-control"
-        ?readonly=${this.readonly}
-        .value=${this.value}
-        @change=${e=>this.value=parseInt(e.target.value,10)}
-      />
-    `}};__decorate([property({type:Number})],IntTypeElement.prototype,"value",void 0),IntTypeElement=__decorate([customElement(componentName)],IntTypeElement);export{IntTypeElement};
+import{html as l,nothing as p}from"lit";import{property as f,customElement as d}from"lit/decorators.js";import{live as h}from"lit/directives/live.js";import{BaseElement as $}from"@typo3/backend/settings/type/base.js";var u=function(i,e,t,o){var r=arguments.length,n=r<3?e:o===null?o=Object.getOwnPropertyDescriptor(e,t):o,s;if(typeof Reflect=="object"&&typeof Reflect.decorate=="function")n=Reflect.decorate(i,e,t,o);else for(var m=i.length-1;m>=0;m--)(s=i[m])&&(n=(r<3?s(n):r>3?s(e,t,n):s(e,t))||n);return r>3&&n&&Object.defineProperty(e,t,n),n};const c="typo3-backend-settings-type-int";let a=class extends ${handleChange(e){const t=e.target;t.reportValidity()&&(t instanceof HTMLInputElement?this.value=t.valueAsNumber:this.value=parseInt(t.value,10))}renderEnum(){return l`<select id=${this.formid} class=form-select ?readonly=${this.readonly} .value=${h(this.value)} @change=${this.handleChange}>${Object.entries(this.enum).map(([e,t])=>l`<option ?selected=${this.value.toString()===e} value=${e}>${t}${this.debug?l`[${e}]`:p}</option>`)}</select>`}render(){return typeof this.enum=="object"?this.renderEnum():l`<input type=number id=${this.formid} class=form-control ?readonly=${this.readonly} .value=${h(String(this.value))} required min=${this.options.min??p} max=${this.options.max??p} step=${this.options.step??p} @change=${this.handleChange}>`}};u([f({type:Number})],a.prototype,"value",void 0),a=u([d(c)],a);export{a as IntTypeElement,c as componentName};

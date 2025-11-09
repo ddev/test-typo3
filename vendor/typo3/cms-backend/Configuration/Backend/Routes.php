@@ -1,6 +1,7 @@
 <?php
 
 use TYPO3\CMS\Backend\Controller;
+use TYPO3\CMS\Backend\Security\SudoMode\Access\AccessLifetime;
 
 /**
  * Definitions for routes provided by EXT:backend
@@ -107,6 +108,10 @@ return [
     'mfa' => [
         'path' => '/mfa',
         'target' => Controller\MfaConfigurationController::class . '::handleRequest',
+        'sudoMode' => [
+            'group' => 'mfa',
+            'lifetime' => AccessLifetime::medium,
+        ],
     ],
 
     /** Wizards */
@@ -285,4 +290,10 @@ return [
         'target' => Controller\ClipboardController::class . '::processRequest',
     ],
 
+    // Request thumbnail, created on-demand
+    'resource_request_thumbnail' => [
+        'path' => '/resource/request-thumbnail',
+        'methods' => ['GET'],
+        'target' => Controller\Resource\ResourceController::class . '::requestThumbnailAction',
+    ],
 ];

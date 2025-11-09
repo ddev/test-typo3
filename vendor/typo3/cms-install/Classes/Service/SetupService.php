@@ -249,38 +249,51 @@ For each website you need a TypoScript record on the main page of your website (
     /**
      * Initializes backend user group presets. Currently hard-coded to editor and advanced editor.
      * When more backend user group presets are added, please refactor (maybe DTO).
+     *
+     * @return string[]
      */
-    public function createBackendUserGroups(bool $createEditor = true, bool $createAdvancedEditor = true): void
+    public function createBackendUserGroups(bool $createEditor = true, bool $createAdvancedEditor = true, bool $force = false): array
     {
+        $messages = [];
         $connectionPool = GeneralUtility::makeInstance(ConnectionPool::class);
+        $this->createFileMount('1:/user_upload/', 'User Upload');
         if ($createEditor) {
-            $connectionPool->getConnectionForTable('be_groups')->insert(
-                'be_groups',
-                [
-                    'title' => BackendUserGroupType::EDITOR->value,
-                    'description' => 'Editors have access to basic content element and modules in the backend.',
-                    'tstamp' => time(),
-                    'crdate' => time(),
-                ]
-            );
-            $editorGroupUid = (int)$connectionPool->getConnectionForTable('be_groups')->lastInsertId();
-            $editorPermissionPreset = $this->yamlFileLoader->load('EXT:install/Configuration/PermissionPreset/be_groups_editor.yaml');
-            $this->applyPermissionPreset($editorPermissionPreset, 'be_groups', $editorGroupUid);
+            if (!$force && $this->countBackendGroupsByTitle($connectionPool, BackendUserGroupType::EDITOR->value) > 0) {
+                $messages[] = sprintf('Group "%s" could not be created. A backend user group of that name already exists and option --force was not set. ', BackendUserGroupType::EDITOR->value);
+            } else {
+                $connectionPool->getConnectionForTable('be_groups')->insert(
+                    'be_groups',
+                    [
+                        'title' => BackendUserGroupType::EDITOR->value,
+                        'description' => 'Editors have access to basic content element and modules in the backend.',
+                        'tstamp' => time(),
+                        'crdate' => time(),
+                    ]
+                );
+                $editorGroupUid = (int)$connectionPool->getConnectionForTable('be_groups')->lastInsertId();
+                $editorPermissionPreset = $this->yamlFileLoader->load('EXT:install/Configuration/PermissionPreset/be_groups_editor.yaml');
+                $this->applyPermissionPreset($editorPermissionPreset, 'be_groups', $editorGroupUid);
+            }
         }
         if ($createAdvancedEditor) {
-            $connectionPool->getConnectionForTable('be_groups')->insert(
-                'be_groups',
-                [
-                    'title' => BackendUserGroupType::ADVANCED_EDITOR->value,
-                    'description' => 'Advanced Editors have access to all content elements and non administrative modules in the backend.',
-                    'tstamp' => time(),
-                    'crdate' => time(),
-                ]
-            );
-            $advancedEditorGroupUid = (int)$connectionPool->getConnectionForTable('be_groups')->lastInsertId();
-            $advancedEditorPermissionPreset = $this->yamlFileLoader->load('EXT:install/Configuration/PermissionPreset/be_groups_advanced_editor.yaml');
-            $this->applyPermissionPreset($advancedEditorPermissionPreset, 'be_groups', $advancedEditorGroupUid);
+            if (!$force && $this->countBackendGroupsByTitle($connectionPool, BackendUserGroupType::ADVANCED_EDITOR->value) > 0) {
+                $messages[] = sprintf('Group "%s" could not be created. A backend user group of that name already exists and option --force was not set. ', BackendUserGroupType::ADVANCED_EDITOR->value);
+            } else {
+                $connectionPool->getConnectionForTable('be_groups')->insert(
+                    'be_groups',
+                    [
+                        'title' => BackendUserGroupType::ADVANCED_EDITOR->value,
+                        'description' => 'Advanced Editors have access to all content elements and non administrative modules in the backend.',
+                        'tstamp' => time(),
+                        'crdate' => time(),
+                    ]
+                );
+                $advancedEditorGroupUid = (int)$connectionPool->getConnectionForTable('be_groups')->lastInsertId();
+                $advancedEditorPermissionPreset = $this->yamlFileLoader->load('EXT:install/Configuration/PermissionPreset/be_groups_advanced_editor.yaml');
+                $this->applyPermissionPreset($advancedEditorPermissionPreset, 'be_groups', $advancedEditorGroupUid);
+            }
         }
+        return $messages;
     }
 
     private function applyPermissionPreset(array $permissionPreset, string $table, int $recordId): void
@@ -288,6 +301,16 @@ For each website you need a TypoScript record on the main page of your website (
         $mappedPermissions = [];
         if (isset($permissionPreset['dbMountpoints']) && is_array($permissionPreset['dbMountpoints'])) {
             $mappedPermissions['db_mountpoints'] = implode(',', $permissionPreset['dbMountpoints']);
+        }
+        if (isset($permissionPreset['fileMountpoints']) && is_array($permissionPreset['fileMountpoints'])) {
+            $fileMountIds = [];
+            foreach ($permissionPreset['fileMountpoints'] as $fileMountpoint) {
+                $fileMountpointId = $this->getFileMount($fileMountpoint);
+                if ($fileMountpointId > 0) {
+                    $fileMountIds[] = $fileMountpointId;
+                }
+            }
+            $mappedPermissions['file_mountpoints'] = implode(',', $fileMountIds);
         }
         if (isset($permissionPreset['groupMods']) && is_array($permissionPreset['groupMods'])) {
             $mappedPermissions['groupMods'] = implode(',', $permissionPreset['groupMods']);
@@ -329,7 +352,7 @@ For each website you need a TypoScript record on the main page of your website (
         $databaseConnection = GeneralUtility::makeInstance(ConnectionPool::class)->getConnectionForTable($table);
         if (
             // availableWidgets is only available if typo3/cms-dashboard is installed
-            $databaseConnection->getSchemaInformation()->introspectTable($table)->hasColumn('availableWidgets')
+            $databaseConnection->getSchemaInformation()->getTableInfo($table)->hasColumnInfo('availableWidgets')
             && isset($permissionPreset['availableWidgets'])
             && is_array($permissionPreset['availableWidgets'])
         ) {
@@ -347,5 +370,51 @@ For each website you need a TypoScript record on the main page of your website (
     private function makePathRelativeToProjectDirectory(string $absolutePath): string
     {
         return str_replace(Environment::getProjectPath(), '', $absolutePath);
+    }
+
+    private function countBackendGroupsByTitle(ConnectionPool $connectionPool, string $title): int
+    {
+        $queryBuilder = $connectionPool->getQueryBuilderForTable('be_groups');
+        return (int)$queryBuilder->count('*')
+            ->from('be_groups')
+            ->where(
+                $queryBuilder->expr()->eq('title', $queryBuilder->createNamedParameter($title))
+            )->executeQuery()->fetchOne();
+    }
+
+    private function createFileMount(string $identifier, string $title): int
+    {
+        $connectionPool = GeneralUtility::makeInstance(ConnectionPool::class);
+        $queryBuilder = $connectionPool->getQueryBuilderForTable('sys_filemounts');
+        $row = $queryBuilder->select('uid')
+            ->from('sys_filemounts')
+            ->where($queryBuilder->expr()->eq('identifier', $queryBuilder->createNamedParameter($identifier)))
+            ->executeQuery()
+            ->fetchAssociative();
+        if (is_array($row)) {
+            return (int)$row['uid'];
+        }
+        $queryBuilder = $connectionPool->getQueryBuilderForTable('sys_filemounts');
+        $queryBuilder->insert('sys_filemounts')->values(
+            [
+                'pid' => 0,
+                'tstamp' => time(),
+                'title' => $title,
+                'identifier' => $identifier,
+            ]
+        )->executeStatement();
+        return (int)$connectionPool->getConnectionForTable('sys_filemounts')->lastInsertId();
+    }
+
+    private function getFileMount(string $identifier): int
+    {
+        $connectionPool = GeneralUtility::makeInstance(ConnectionPool::class);
+        $queryBuilder = $connectionPool->getQueryBuilderForTable('sys_filemounts');
+        $row = $queryBuilder->select('uid')
+            ->from('sys_filemounts')
+            ->where($queryBuilder->expr()->eq('identifier', $queryBuilder->createNamedParameter($identifier)))
+            ->executeQuery()
+            ->fetchAssociative();
+        return (int)($row['uid'] ?? 0);
     }
 }

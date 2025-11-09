@@ -19,11 +19,11 @@
         "ext-json": "*",
         "ext-simplexml": "*",
         "friendsofphp/php-cs-fixer": "^3.59.3",
-        "phpstan/phpstan": "^1.11.5",
-        "phpstan/phpstan-phpunit": "^1.4.0",
-        "phpunit/phpunit": "^11.2.5",
-        "t3docs/fluid-documentation-generator": "^4.3",
-        "psr/container": "^2.0"
+        "phpstan/phpstan": "^2.1.17",
+        "phpstan/phpstan-phpunit": "^2.0.6",
+        "phpunit/phpunit": "^11.5.22 || ^12.2.1",
+        "psr/container": "^2.0",
+        "t3docs/fluid-documentation-generator": "^4.3"
     },
     "suggest": {
         "ext-json": "PHP JSON is needed when using JSONVariableProvider: A relatively rare use case",
@@ -42,5 +42,10 @@
     },
     "bin": [
         "bin/fluid"
-    ]
+    ],
+    "extra": {
+        "branch-alias": {
+            "dev-main": "4.x-dev"
+        }
+    }
 }

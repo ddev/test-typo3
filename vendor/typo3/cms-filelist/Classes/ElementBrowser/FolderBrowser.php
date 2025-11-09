@@ -60,6 +60,15 @@ class FolderBrowser extends AbstractResourceBrowser
         if ($this->selectedFolder instanceof Folder) {
             $markup = [];
 
+            // Create the filelist
+            $this->filelist->start(
+                $this->selectedFolder,
+                MathUtility::forceIntegerInRange($this->currentPage, 1, 100000),
+                $this->sortField,
+                $this->sortDirection,
+                Mode::BROWSE
+            );
+
             // Create the filelist header bar
             $markup[] = '<div class="row justify-content-between mb-2">';
             $markup[] = '    <div class="col-auto">';
@@ -72,18 +81,11 @@ class FolderBrowser extends AbstractResourceBrowser
             $markup[] = '        </div>';
             $markup[] = '    </div>';
             $markup[] = '    <div class="col-auto">';
+            $markup[] = '        ' . $this->getSortingModeButtons($this->filelist->mode);
             $markup[] = '        ' . $this->getViewModeButton();
             $markup[] = '    </div>';
             $markup[] = '</div>';
 
-            // Create the filelist
-            $this->filelist->start(
-                $this->selectedFolder,
-                MathUtility::forceIntegerInRange($this->currentPage, 1, 100000),
-                $this->getRequest()->getQueryParams()['sort'] ?? '',
-                ($this->getRequest()->getQueryParams()['reverse'] ?? '') === '1',
-                Mode::BROWSE
-            );
             $this->filelist->setResourceDisplayMatcher($this->resourceDisplayMatcher);
             $this->filelist->setResourceSelectableMatcher($this->resourceSelectableMatcher);
             $markup[] = $this->filelist->render(null, $this->view);

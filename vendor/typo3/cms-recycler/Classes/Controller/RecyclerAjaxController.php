@@ -32,11 +32,13 @@ use TYPO3\CMS\Core\Http\JsonResponse;
 use TYPO3\CMS\Core\Imaging\IconFactory;
 use TYPO3\CMS\Core\Imaging\IconSize;
 use TYPO3\CMS\Core\Localization\LanguageService;
+use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
+use TYPO3\CMS\Core\Schema\TcaSchema;
+use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Core\Utility\MathUtility;
 use TYPO3\CMS\Extbase\Utility\LocalizationUtility;
 use TYPO3\CMS\Recycler\Domain\Model\DeletedRecords;
-use TYPO3\CMS\Recycler\Utility\RecyclerUtility;
 
 /**
  * Controller class for the 'recycler' extension. Handles the AJAX requests.
@@ -57,7 +59,8 @@ class RecyclerAjaxController
         protected readonly FrontendInterface $runtimeCache,
         protected readonly IconFactory $iconFactory,
         protected readonly ConnectionPool $connectionPool,
-        protected readonly RecordHistory $recordHistory
+        protected readonly RecordHistory $recordHistory,
+        protected readonly TcaSchemaFactory $tcaSchemaFactory,
     ) {}
 
     /**
@@ -126,7 +129,7 @@ class RecyclerAjaxController
                 }
 
                 $model = GeneralUtility::makeInstance(DeletedRecords::class);
-                $affectedRecords = $model->undeleteData($this->conf['records'], $this->conf['recursive']);
+                $affectedRecords = $model->undeleteData($this->conf['records'], (bool)$this->conf['recursive']);
                 $messageKey = 'flashmessage.undo.' . ($affectedRecords !== false ? 'success' : 'failure') . '.' . ((int)$affectedRecords === 1 ? 'singular' : 'plural');
                 $content = [
                     'success' => true,
@@ -167,9 +170,10 @@ class RecyclerAjaxController
         $lang = $this->getLanguageService();
 
         foreach ($deletedRowsArray as $table => $rows) {
+            $schema = $this->tcaSchemaFactory->get($table);
             $groupedRecords[$table]['information'] = [
                 'table' => $table,
-                'title' => isset($GLOBALS['TCA'][$table]['ctrl']['title']) ? $lang->sL($GLOBALS['TCA'][$table]['ctrl']['title']) : BackendUtility::getNoRecordTitle(),
+                'title' => $schema->getTitle($lang->sL(...)) ?: BackendUtility::getNoRecordTitle(),
             ];
             foreach ($rows as $row) {
                 $pageTitle = $this->getPageTitle((int)$row['pid']);
@@ -177,13 +181,21 @@ class RecyclerAjaxController
                 $ownerUid = (int)(is_array($ownerInformation) && $ownerInformation['usertype'] === 'BE' ? $ownerInformation['userid'] : 0);
                 $deleteUserUid = $this->recordHistory->getUserIdFromDeleteActionForRecord($table, (int)$row['uid']);
 
+                $creationDate = '';
+                if ($schema->hasCapability(TcaSchemaCapability::CreatedAt)) {
+                    $creationDate = BackendUtility::datetime($row[$schema->getCapability(TcaSchemaCapability::CreatedAt)->getFieldName()]);
+                }
+                $lastUpdateDate = '';
+                if ($schema->hasCapability(TcaSchemaCapability::UpdatedAt)) {
+                    $lastUpdateDate = BackendUtility::datetime($row[$schema->getCapability(TcaSchemaCapability::UpdatedAt)->getFieldName()]);
+                }
                 $groupedRecords[$table]['records'][] = [
                     'uid' => $row['uid'],
                     'pid' => $row['pid'],
                     'icon' => $this->iconFactory->getIconForRecord($table, $row, IconSize::SMALL)->render(),
                     'pageTitle' => $pageTitle,
-                    'crdate' => isset($GLOBALS['TCA'][$table]['ctrl']['crdate']) ? BackendUtility::datetime($row[$GLOBALS['TCA'][$table]['ctrl']['crdate']]) : '',
-                    'tstamp' => isset($GLOBALS['TCA'][$table]['ctrl']['tstamp']) ? BackendUtility::datetime($row[$GLOBALS['TCA'][$table]['ctrl']['tstamp']]) : '',
+                    'crdate' => $creationDate,
+                    'tstamp' => $lastUpdateDate,
                     'backendUserUid' => $ownerUid,
                     'backendUser' => $this->getBackendUserInformation($ownerUid),
                     'title' => BackendUtility::getRecordTitle($table, $row),
@@ -332,48 +344,69 @@ class RecyclerAjaxController
         $lang = $this->getLanguageService();
         $tables = [];
 
-        foreach (RecyclerUtility::getModifyableTables() as $tableName) {
-            $deletedField = RecyclerUtility::getDeletedField($tableName);
-            if ($deletedField) {
-                // Determine whether the table has deleted records:
-                $queryBuilder = $this->connectionPool->getQueryBuilderForTable($tableName);
-                $queryBuilder->getRestrictions()->removeAll();
+        foreach ($this->getRelevantSchemata() as $tableName => $schema) {
+            $deletedField = $schema->getCapability(TcaSchemaCapability::SoftDelete)->getFieldName();
+            // Determine whether the table has deleted records
+            $queryBuilder = $this->connectionPool->getQueryBuilderForTable($tableName);
+            $queryBuilder->getRestrictions()->removeAll();
 
-                $deletedCount = $queryBuilder->count('uid')
-                    ->from($tableName)
-                    ->where(
-                        $queryBuilder->expr()->neq(
-                            $deletedField,
-                            $queryBuilder->createNamedParameter(0, Connection::PARAM_INT)
-                        )
+            $deletedCount = $queryBuilder->count('uid')
+                ->from($tableName)
+                ->where(
+                    $queryBuilder->expr()->neq(
+                        $deletedField,
+                        $queryBuilder->createNamedParameter(0, Connection::PARAM_INT)
                     )
-                    ->executeQuery()
-                    ->fetchOne();
+                )
+                ->executeQuery()
+                ->fetchOne();
 
-                if ($deletedCount) {
-                    /* @var DeletedRecords $deletedDataObject */
-                    $deletedDataObject = GeneralUtility::makeInstance(DeletedRecords::class);
-                    $deletedData = $deletedDataObject->loadData($startUid, $tableName, $depth)->getDeletedRows();
-                    if (isset($deletedData[$tableName])) {
-                        if ($deletedRecordsInTable = count($deletedData[$tableName])) {
-                            $deletedRecordsTotal += $deletedRecordsInTable;
-                            $tables[] = [
-                                $tableName,
-                                $deletedRecordsInTable,
-                                $lang->sL($GLOBALS['TCA'][$tableName]['ctrl']['title'] ?? $tableName),
-                            ];
-                        }
-                    }
-                }
+            if (!$deletedCount) {
+                continue;
+            }
+            /* @var DeletedRecords $deletedDataObject */
+            $deletedDataObject = GeneralUtility::makeInstance(DeletedRecords::class);
+            $deletedData = $deletedDataObject->loadData($startUid, $tableName, $depth)->getDeletedRows();
+            if (isset($deletedData[$tableName]) && $deletedRecordsInTable = count($deletedData[$tableName])) {
+                $deletedRecordsTotal += $deletedRecordsInTable;
+                $tables[] = [
+                    $tableName,
+                    $deletedRecordsInTable,
+                    $schema->getTitle($lang->sL(...)) ?: $tableName,
+                ];
             }
         }
-        $jsonArray = $tables;
-        array_unshift($jsonArray, [
+
+        array_unshift($tables, [
             '',
             $deletedRecordsTotal,
             $lang->sL('LLL:EXT:recycler/Resources/Private/Language/locallang.xlf:label_allrecordtypes'),
         ]);
-        return $jsonArray;
+        return $tables;
+    }
+
+    /**
+     * Returns the modifiable tables of the current user, which have a SoftDelete field.
+     *
+     * @return TcaSchema[]
+     */
+    protected function getRelevantSchemata(): array
+    {
+        $schemata = [];
+        $tables = explode(',', $this->getBackendUser()->groupData['tables_modify']);
+        foreach ($this->tcaSchemaFactory->all() as $name => $schema) {
+            if (!$schema->hasCapability(TcaSchemaCapability::SoftDelete)) {
+                continue;
+            }
+            if ($this->getBackendUser()->isAdmin()) {
+                $schemata[$name] = $schema;
+                continue;
+            }
+            if (in_array($name, $tables, true)) {
+                $schemata[$name] = $schema;
+            }
+        }
+        return $schemata;
     }
 
     protected function getBackendUser(): BackendUserAuthentication

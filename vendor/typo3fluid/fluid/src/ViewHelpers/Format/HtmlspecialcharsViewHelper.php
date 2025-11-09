@@ -59,7 +59,6 @@ class HtmlspecialcharsViewHelper extends AbstractViewHelper
 
     public function initializeArguments()
     {
-        parent::initializeArguments();
         $this->registerArgument('value', 'string', 'Value to format');
         $this->registerArgument('keepQuotes', 'boolean', 'If true quotes will not be replaced (ENT_NOQUOTES)', false, false);
         $this->registerArgument('encoding', 'string', 'Encoding', false, 'UTF-8');
@@ -72,7 +71,6 @@ class HtmlspecialcharsViewHelper extends AbstractViewHelper
      * @return mixed the altered string. If a non-string is provided, the value is returned unchanged
      * @see http://www.php.net/manual/function.htmlspecialchars.php
      * @api
-     * @todo change return type to string. This needs further investigation because the ViewHelper is used internally by Fluid
      */
     public function render()
     {

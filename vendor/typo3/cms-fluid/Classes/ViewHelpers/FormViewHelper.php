@@ -34,38 +34,16 @@ use TYPO3\CMS\Fluid\ViewHelpers\Form\AbstractFormViewHelper;
 use TYPO3\CMS\Fluid\ViewHelpers\Form\CheckboxViewHelper;
 
 /**
- * Form ViewHelper. Generates a :html:`<form>` Tag. Tailored for extbase plugins, uses extbase Request.
+ * ViewHelper to generate a `<form>` tag and prepare context for
+ * further `<f:form>` ViewHelpers within that form.
+ * Tailored for Extbase plugins, uses Extbase Request.
  *
- * Basic usage
- * ===========
+ * ```
+ *   <f:form action="new" controller="BlogPostEditing" object="{blog}" name="blog" method="post"
+ *           arguments="{somePostKey: 'someValue'}" enctype="multipart/form-data">...</f:form>
+ * ```
  *
- * Use :html:`<f:form>` to output an HTML :html:`<form>` tag which is targeted
- * at the specified action, in the current controller and package.
- * It will submit the form data via a POST request. If you want to change this,
- * use :html:`method="get"` as an argument.
- *
- * Examples
- * ========
- *
- * A complex form with a specified encoding type
- * ---------------------------------------------
- *
- * Form with enctype set::
- *
- *    <f:form action=".." controller="..." package="..." enctype="multipart/form-data">...</f:form>
- *
- * A Form which should render a domain object
- * ------------------------------------------
- *
- * Binding a domain object to a form::
- *
- *    <f:form action="..." name="customer" object="{customer}">
- *       <f:form.hidden property="id" />
- *       <f:form.textarea property="name" />
- *    </f:form>
- *
- * This automatically inserts the value of ``{customer.name}`` inside the
- * textarea and adjusts the name of the textarea accordingly.
+ * @see https://docs.typo3.org/permalink/t3viewhelper:typo3-fluid-form
  */
 class FormViewHelper extends AbstractFormViewHelper
 {
@@ -274,12 +252,13 @@ class FormViewHelper extends AbstractFormViewHelper
             '@action' => $actionName,
         ];
 
+        $endingSlash = ($this->shouldUseXHtmlSlash() ? '/' : '');
         $result = LF;
-        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[@extension]')) . '" value="' . htmlspecialchars($extensionName) . '" />' . LF;
-        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[@controller]')) . '" value="' . htmlspecialchars($controllerName) . '" />' . LF;
-        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[@action]')) . '" value="' . htmlspecialchars($actionName) . '" />' . LF;
-        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[arguments]')) . '" value="' . htmlspecialchars($this->hashService->appendHmac(base64_encode(serialize($request->getArguments())), HashScope::ReferringArguments->prefix())) . '" />' . LF;
-        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[@request]')) . '" value="' . htmlspecialchars($this->hashService->appendHmac(json_encode($actionRequest), HashScope::ReferringRequest->prefix())) . '" />' . LF;
+        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[@extension]')) . '" value="' . htmlspecialchars($extensionName) . '" ' . $endingSlash . '>' . LF;
+        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[@controller]')) . '" value="' . htmlspecialchars($controllerName) . '" ' . $endingSlash . '>' . LF;
+        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[@action]')) . '" value="' . htmlspecialchars($actionName) . '" ' . $endingSlash . '>' . LF;
+        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[arguments]')) . '" value="' . htmlspecialchars($this->hashService->appendHmac(base64_encode(serialize($request->getArguments())), HashScope::ReferringArguments->prefix())) . '" ' . $endingSlash . '>' . LF;
+        $result .= '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__referrer[@request]')) . '" value="' . htmlspecialchars($this->hashService->appendHmac(json_encode($actionRequest), HashScope::ReferringRequest->prefix())) . '" ' . $endingSlash . '>' . LF;
 
         return $result;
     }
@@ -438,7 +417,7 @@ class FormViewHelper extends AbstractFormViewHelper
     {
         $formFieldNames = $this->renderingContext->getViewHelperVariableContainer()->get(FormViewHelper::class, 'formFieldNames');
         $requestHash = $this->mvcPropertyMappingConfigurationService->generateTrustedPropertiesToken($formFieldNames, $this->getFieldNamePrefix());
-        return '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__trustedProperties')) . '" value="' . htmlspecialchars($requestHash) . '" />';
+        return '<input type="hidden" name="' . htmlspecialchars($this->prefixFieldName('__trustedProperties')) . '" value="' . htmlspecialchars($requestHash) . '" ' . ($this->shouldUseXHtmlSlash() ? '/' : '') . '>';
     }
 
     protected function renderRequestTokenHiddenField(): string
@@ -481,6 +460,7 @@ class FormViewHelper extends AbstractFormViewHelper
             'name' => RequestToken::PARAM_NAME,
             'value' => $requestToken->toHashSignedJwt($signingSecret),
         ];
-        return '<input ' . GeneralUtility::implodeAttributes($attrs, true) . '/>';
+        return '<input ' . GeneralUtility::implodeAttributes($attrs, true) . ($this->shouldUseXHtmlSlash() ? '/' : '') . '>';
     }
+
 }

@@ -287,14 +287,18 @@ readonly class ResourceFactory implements SingletonInterface
             return null;
         }
         // this is a backwards-compatible way to access "0-storage" files or folders
+        // @todo: this needs to be removed once we remove support for fallback storage
         // eliminate double slashes, /./ and /../
         $input = PathUtility::getCanonicalPath(ltrim($input, '/'));
         if (@is_file(Environment::getPublicPath() . '/' . $input)) {
             // only the local file
             return $this->getFileObjectFromCombinedIdentifier($input);
         }
-        // only the local path
-        return $this->getFolderObjectFromCombinedIdentifier($input);
+        if (@is_dir(Environment::getPublicPath() . '/' . ltrim($input, '/'))) {
+            // only the local path
+            return $this->getFolderObjectFromCombinedIdentifier(ltrim($input, '/'));
+        }
+        return null;
     }
 
     /**
@@ -363,12 +367,17 @@ readonly class ResourceFactory implements SingletonInterface
     {
         if (array_key_exists('storage', $fileData) && MathUtility::canBeInterpretedAsInteger($fileData['storage'])) {
             $storageObject = $this->storageRepository->findByUid((int)$fileData['storage']);
-        } elseif ($storage !== null) {
-            $storageObject = $storage;
-            $fileData['storage'] = $storage->getUid();
         } else {
+            $storageObject = $storage;
+        }
+
+        // Ensure a storage could be fetched to create the file.
+        if ($storageObject === null) {
             throw new \RuntimeException('A file needs to reside in a Storage', 1381570997);
         }
+
+        $fileData['storage'] = $storageObject->getUid();
+
         $fileObject = GeneralUtility::makeInstance(File::class, $fileData, $storageObject);
         return $fileObject;
     }
@@ -417,9 +426,8 @@ readonly class ResourceFactory implements SingletonInterface
      *
      * @param int $uid The uid of the file usage (sys_file_reference) to be fetched
      * @param bool $raw Whether to get raw results without performing overlays
-     * @return array|null
      */
-    protected function getFileReferenceData(int $uid, bool $raw = false): ?array
+    protected function getFileReferenceData(int $uid, bool $raw = false): array|false|null
     {
         $request = $GLOBALS['TYPO3_REQUEST'] ?? null;
         if (!$raw

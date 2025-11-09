@@ -49,24 +49,26 @@ class FolderLinkHandler extends AbstractResourceLinkHandler
     {
         $contentHtml = '';
         if ($this->selectedFolder !== null) {
+            // Create the filelist
+            $this->filelist->start(
+                $this->selectedFolder,
+                MathUtility::forceIntegerInRange($this->currentPage, 1, 100000),
+                $this->sortField,
+                $this->sortDirection,
+                Mode::BROWSE
+            );
+
             $markup = [];
 
             // Create the filelist header bar
             $markup[] = '<div class="row justify-content-between mb-2">';
             $markup[] = '    <div class="col-auto"></div>';
             $markup[] = '    <div class="col-auto">';
+            $markup[] = '        ' . $this->getSortingModeButtons($request, $this->filelist->mode);
             $markup[] = '        ' . $this->getViewModeButton($request);
             $markup[] = '    </div>';
             $markup[] = '</div>';
 
-            // Create the filelist
-            $this->filelist->start(
-                $this->selectedFolder,
-                MathUtility::forceIntegerInRange($this->currentPage, 1, 100000),
-                $request->getQueryParams()['sort'] ?? '',
-                ($request->getQueryParams()['reverse'] ?? '') === '1',
-                Mode::BROWSE
-            );
             $this->filelist->setResourceDisplayMatcher($this->resourceDisplayMatcher);
             $this->filelist->setResourceSelectableMatcher($this->resourceSelectableMatcher);
 

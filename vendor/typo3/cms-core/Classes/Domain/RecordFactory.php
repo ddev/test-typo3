@@ -89,12 +89,17 @@ readonly class RecordFactory
         // Only use the fields that are defined in the schema
         $properties = [];
         foreach ($record as $fieldName => $fieldValue) {
-            if ($subSchema && !$subSchema->hasField($fieldName)) {
+            if ($subSchema) {
+                if (!$subSchema->hasField($fieldName)) {
+                    continue;
+                }
+                $schema = $subSchema;
+            } elseif (!$schema->hasField($fieldName)) {
                 continue;
             }
             $properties[$fieldName] = $fieldValue;
         }
-        return $this->createRecord($rawRecord, $properties);
+        return $this->createRecord($rawRecord, $properties, $schema);
     }
 
     /**
@@ -143,7 +148,7 @@ readonly class RecordFactory
                 $recordIdentityMap
             );
         }
-        $resolvedRecord = $this->createRecord($rawRecord, $properties, $context);
+        $resolvedRecord = $this->createRecord($rawRecord, $properties, $schema, $context, $recordIdentityMap);
         $recordIdentityMap->add($resolvedRecord);
         return $resolvedRecord;
     }
@@ -161,9 +166,9 @@ readonly class RecordFactory
         }
         $schema = $this->schemaFactory->get($table);
         $fullType = $table;
-        $subSchemaDivisorField = $schema->getSubSchemaDivisorField();
-        if ($subSchemaDivisorField !== null) {
-            $subSchemaDivisorFieldName = $subSchemaDivisorField->getName();
+        if ($schema->supportsSubSchema() && ($subSchemaTypeInformation = $schema->getSubSchemaTypeInformation())->isPointerToForeignFieldInForeignSchema() === false) {
+            // @todo Limitation to local SubSchemaDivisorField, because the actual record type is defined in foreign record.
+            $subSchemaDivisorFieldName = $subSchemaTypeInformation->getFieldName();
             if (!isset($record[$subSchemaDivisorFieldName])) {
                 throw new \InvalidArgumentException(
                     'Missing typeField "' . $subSchemaDivisorFieldName . '" in record of requested table "' . $table . '".',
@@ -181,16 +186,17 @@ readonly class RecordFactory
     /**
      * Quick helper function in order to avoid duplicate code.
      */
-    protected function createRecord(RawRecord $rawRecord, array $properties, ?Context $context = null): RecordInterface
+    protected function createRecord(RawRecord $rawRecord, array $properties, TcaSchema $schema, ?Context $context = null, ?RecordIdentityMap $recordIdentityMap = null): RecordInterface
     {
         $context = $context ?? GeneralUtility::makeInstance(Context::class);
-        $schema = $this->schemaFactory->get($rawRecord->getMainType());
+        $mainSchema = $this->schemaFactory->get($rawRecord->getMainType());
+        $recordIdentityMap = $recordIdentityMap ?? GeneralUtility::makeInstance(RecordIdentityMap::class);
         [$properties, $systemProperties] = $this->extractSystemInformation(
-            $schema,
+            $mainSchema,
             $rawRecord,
             $properties,
         );
-        $event = new RecordCreationEvent($properties, $rawRecord, $systemProperties, $context);
+        $event = new RecordCreationEvent($properties, $rawRecord, $systemProperties, $context, $recordIdentityMap, $schema);
         $this->eventDispatcher->dispatch($event);
         return $event->isPropagationStopped()
             ? $event->getRecord()
@@ -199,6 +205,17 @@ readonly class RecordFactory
 
     protected function extractComputedProperties(array &$record): ComputedProperties
     {
+        $computed = $record['_computed'] ?? null;
+        if (is_array($computed)) {
+            $computedProperties = new ComputedProperties(
+                $computed['versionedUid'] ?? null,
+                $computed['localizedUid'] ?? null,
+                $computed['requestedOverlayLanguageId'] ?? null,
+                $computed['translationSource'] ?? null
+            );
+            unset($record['_computed']);
+            return $computedProperties;
+        }
         $computedProperties = new ComputedProperties(
             $record['_ORIG_uid'] ?? null,
             $record['_LOCALIZED_UID'] ?? null,
@@ -286,16 +303,16 @@ readonly class RecordFactory
             }
             switch ($capability) {
                 case TcaSchemaCapability::CreatedAt:
-                    $systemProperties['createdAt'] = (new \DateTimeImmutable())->setTimestamp($rawRecord->get($fieldName));
+                    $systemProperties['createdAt'] = DateTimeFactory::createFromTimestamp($rawRecord->get($fieldName));
                     break;
                 case TcaSchemaCapability::UpdatedAt:
-                    $systemProperties['lastUpdatedAt'] = (new \DateTimeImmutable())->setTimestamp($rawRecord->get($fieldName));
+                    $systemProperties['lastUpdatedAt'] = DateTimeFactory::createFromTimestamp($rawRecord->get($fieldName));
                     break;
                 case TcaSchemaCapability::RestrictionStartTime:
-                    $systemProperties['publishAt'] = (new \DateTimeImmutable())->setTimestamp($rawRecord->get($fieldName));
+                    $systemProperties['publishAt'] = DateTimeFactory::createFromTimestamp($rawRecord->get($fieldName));
                     break;
                 case TcaSchemaCapability::RestrictionEndTime:
-                    $systemProperties['publishUntil'] = (new \DateTimeImmutable())->setTimestamp($rawRecord->get($fieldName));
+                    $systemProperties['publishUntil'] = DateTimeFactory::createFromTimestamp($rawRecord->get($fieldName));
                     break;
 
                 case TcaSchemaCapability::SoftDelete:

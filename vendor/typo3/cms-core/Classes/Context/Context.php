@@ -19,6 +19,7 @@ namespace TYPO3\CMS\Core\Context;
 
 use TYPO3\CMS\Core\Context\Exception\AspectNotFoundException;
 use TYPO3\CMS\Core\Context\Exception\AspectPropertyNotFoundException;
+use TYPO3\CMS\Core\Domain\DateTimeFactory;
 use TYPO3\CMS\Core\SingletonInterface;
 
 /**
@@ -85,12 +86,7 @@ class Context implements SingletonInterface
             // Ensure the default aspects are available, this is mostly necessary for tests to not set up everything
             switch ($name) {
                 case 'date':
-                    $this->setAspect(
-                        'date',
-                        new DateTimeAspect(
-                            (new \DateTimeImmutable())->setTimestamp($GLOBALS['EXEC_TIME'])
-                        )
-                    );
+                    $this->setAspect('date', new DateTimeAspect(DateTimeFactory::createFromTimestamp($GLOBALS['EXEC_TIME'])));
                     break;
                 case 'visibility':
                     $this->setAspect('visibility', new VisibilityAspect());

@@ -18,6 +18,7 @@ declare(strict_types=1);
 namespace TYPO3\CMS\Core\Database\Schema;
 
 use Doctrine\DBAL\Schema\Column;
+use Doctrine\DBAL\Schema\ColumnDiff;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
 use Doctrine\DBAL\Schema\Index;
 use Doctrine\DBAL\Schema\Table;
@@ -246,6 +247,34 @@ class TableDiff extends DoctrineTableDiff
         // but we rely on it. Restore it !.
         foreach ($tableDiff->getModifiedIndexes() as $modifiedIndex) {
             $diff->modifiedIndexes[$modifiedIndex->getName()] = $modifiedIndex;
+        }
+
+        // Accumulate modified index separated into added and dropped information to modifiedIndexes again,
+        // otherwise required drop action may not be executed before trying to add an existing index first.
+        // Required for planned doctrine/dbal 4.3.0 change (deprecation) and currently breaking with an open
+        // discussion to mitigate that before dbal release. We still prepare for this case to be on the safer
+        // side here.
+        // Needs to be done in a two-step strategy to avoid changing array while iterating over it.
+        // - https://github.com/doctrine/dbal/pull/6831
+        // - https://github.com/doctrine/dbal/issues/6880
+        /**
+         * @var array<int, array{added: Index, dropped: Index}> $transformIndexOperations
+         */
+        $transformIndexOperations = [];
+        foreach ($diff->getAddedIndexes() as $addedIndex) {
+            foreach ($diff->getDroppedIndexes() as $droppedIndex) {
+                if ($droppedIndex->getName() === $addedIndex->getName()) {
+                    $transformIndexOperations[] = [
+                        'added' => $addedIndex,
+                        'dropped' => $droppedIndex,
+                    ];
+                }
+            }
+        }
+        foreach ($transformIndexOperations as $data) {
+            $diff->unsetAddedIndex($data['added']);
+            $diff->unsetDroppedIndex($data['dropped']);
+            $diff->modifiedIndexes[$data['added']->getName()] = $data['added'];
         }
 
         return $diff;

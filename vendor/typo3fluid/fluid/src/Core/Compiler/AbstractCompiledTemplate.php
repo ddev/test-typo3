@@ -34,6 +34,16 @@ abstract class AbstractCompiledTemplate implements ParsedTemplateInterface
         return new StandardVariableProvider();
     }
 
+    public function getArgumentDefinitions(): array
+    {
+        return [];
+    }
+
+    public function getAvailableSlots(): array
+    {
+        return [];
+    }
+
     /**
      * Render the parsed template with rendering context
      *

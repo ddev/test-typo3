@@ -25,6 +25,9 @@ use TYPO3\CMS\Extbase\Reflection\ObjectAccess;
  */
 abstract class AbstractGenericObjectValidator extends AbstractValidator implements ObjectValidatorInterface
 {
+    /**
+     * @var array<string, \SplObjectStorage<ValidatorInterface>>
+     */
     protected array $propertyValidators = [];
 
     /**
@@ -130,7 +133,7 @@ abstract class AbstractGenericObjectValidator extends AbstractValidator implemen
         if (!isset($this->propertyValidators[$propertyName])) {
             $this->propertyValidators[$propertyName] = new \SplObjectStorage();
         }
-        $this->propertyValidators[$propertyName]->attach($validator);
+        $this->propertyValidators[$propertyName]->offsetSet($validator);
     }
 
     protected function isValidatedAlready(object $object): bool
@@ -138,7 +141,7 @@ abstract class AbstractGenericObjectValidator extends AbstractValidator implemen
         if ($this->validatedInstancesContainer === null) {
             $this->validatedInstancesContainer = new \SplObjectStorage();
         }
-        if ($this->validatedInstancesContainer->contains($object)) {
+        if ($this->validatedInstancesContainer->offsetExists($object)) {
             return true;
         }
 
@@ -147,13 +150,15 @@ abstract class AbstractGenericObjectValidator extends AbstractValidator implemen
 
     protected function markInstanceAsValidated(object $object): void
     {
-        $this->validatedInstancesContainer->attach($object);
+        $this->validatedInstancesContainer->offsetSet($object);
     }
 
     /**
      * Returns all property validators - or only validators of the specified property
+     *
+     * @return ($propertyName is null ? array<string, \SplObjectStorage<ValidatorInterface>> : \SplObjectStorage<ValidatorInterface>)
      */
-    public function getPropertyValidators(?string $propertyName = null): array
+    public function getPropertyValidators(?string $propertyName = null): array|\SplObjectStorage
     {
         if ($propertyName !== null) {
             return $this->propertyValidators[$propertyName] ?? [];

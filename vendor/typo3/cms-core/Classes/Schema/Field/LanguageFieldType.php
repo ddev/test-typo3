@@ -26,4 +26,24 @@ final readonly class LanguageFieldType extends AbstractFieldType
     {
         return 'language';
     }
+
+    public function isSearchable(): false
+    {
+        return false;
+    }
+
+    public function isNullable(): false
+    {
+        return false;
+    }
+
+    public function hasDefaultValue(): false
+    {
+        return false;
+    }
+
+    public function getSoftReferenceKeys(): false
+    {
+        return false;
+    }
 }

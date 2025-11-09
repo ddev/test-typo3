@@ -19,7 +19,6 @@ namespace TYPO3\CMS\Core\Schema\Struct;
 
 final class SelectItem implements \ArrayAccess
 {
-    private array $container = [];
     private const LEGACY_INDEXED_KEYS_MAPPING_TABLE = [
         0 => 'label',
         1 => 'value',
@@ -27,6 +26,7 @@ final class SelectItem implements \ArrayAccess
         3 => 'group',
         4 => 'description',
     ];
+    private array $container = [];
 
     public function __construct(
         private string $type,
@@ -40,6 +40,7 @@ final class SelectItem implements \ArrayAccess
         private ?string $iconIdentifierUnchecked = null,
         private ?string $labelChecked = null,
         private ?string $labelUnchecked = null,
+        private ?string $iconOverlay = null,
     ) {}
 
     public static function fromTcaItemArray(array $item, string $type = 'select'): SelectItem
@@ -56,6 +57,7 @@ final class SelectItem implements \ArrayAccess
             iconIdentifierUnchecked: $item['iconIdentifierUnchecked'] ?? null,
             labelChecked: $item['labelChecked'] ?? null,
             labelUnchecked: $item['labelUnchecked'] ?? null,
+            iconOverlay: $item['iconOverlay'] ?? null,
         );
     }
 
@@ -84,6 +86,7 @@ final class SelectItem implements \ArrayAccess
             'label' => $this->label,
             'value' => $this->value,
             'icon' => $this->icon,
+            'iconOverlay' => $this->iconOverlay,
             'group' => $this->group,
             'description' => $this->description,
         ];
@@ -207,6 +210,23 @@ final class SelectItem implements \ArrayAccess
     public function hasLabelUnchecked(): bool
     {
         return $this->labelUnchecked !== null;
+    }
+
+    public function getIconOverlay(): ?string
+    {
+        return $this->iconOverlay;
+    }
+
+    public function hasIconOverlay(): bool
+    {
+        return $this->iconOverlay !== null;
+    }
+
+    public function withIconOverlay(?string $iconOverlay): SelectItem
+    {
+        $clone = clone $this;
+        $clone->iconOverlay = $iconOverlay;
+        return $clone;
     }
 
     public function isDivider(): bool

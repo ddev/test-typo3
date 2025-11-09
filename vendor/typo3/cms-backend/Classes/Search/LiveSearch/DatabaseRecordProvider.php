@@ -18,6 +18,7 @@ declare(strict_types=1);
 namespace TYPO3\CMS\Backend\Search\LiveSearch;
 
 use Doctrine\DBAL\ArrayParameterType;
+use Doctrine\DBAL\Platforms\PostgreSQLPlatform as DoctrinePostgreSQLPlatform;
 use Psr\EventDispatcher\EventDispatcherInterface;
 use TYPO3\CMS\Backend\Routing\UriBuilder;
 use TYPO3\CMS\Backend\Search\Event\BeforeSearchInDatabaseRecordProviderEvent;
@@ -36,11 +37,16 @@ use TYPO3\CMS\Core\Database\Query\QueryHelper;
 use TYPO3\CMS\Core\Database\Query\Restriction\EndTimeRestriction;
 use TYPO3\CMS\Core\Database\Query\Restriction\HiddenRestriction;
 use TYPO3\CMS\Core\Database\Query\Restriction\StartTimeRestriction;
+use TYPO3\CMS\Core\Database\Query\Restriction\WorkspaceRestriction;
 use TYPO3\CMS\Core\Imaging\IconFactory;
 use TYPO3\CMS\Core\Imaging\IconSize;
 use TYPO3\CMS\Core\Localization\LanguageService;
 use TYPO3\CMS\Core\Localization\LanguageServiceFactory;
+use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
+use TYPO3\CMS\Core\Schema\Field\DateTimeFieldType;
+use TYPO3\CMS\Core\Schema\Field\NumberFieldType;
 use TYPO3\CMS\Core\Schema\SearchableSchemaFieldsCollector;
+use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 use TYPO3\CMS\Core\Type\Bitmask\Permission;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Core\Utility\MathUtility;
@@ -65,6 +71,7 @@ final class DatabaseRecordProvider implements SearchProviderInterface
         protected readonly UriBuilder $uriBuilder,
         protected readonly QueryParser $queryParser,
         protected readonly SearchableSchemaFieldsCollector $searchableSchemaFieldsCollector,
+        protected readonly TcaSchemaFactory $tcaSchemaFactory,
     ) {
         $this->languageService = $this->languageServiceFactory->createFromUserPreferences($this->getBackendUser());
         $this->userPermissions = $this->getBackendUser()->getPagePermsClause(Permission::PAGE_SHOW);
@@ -188,6 +195,7 @@ final class DatabaseRecordProvider implements SearchProviderInterface
         $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
             ->getQueryBuilderForTable($tableName);
         $queryBuilder->getRestrictions()
+            ->add(new WorkspaceRestriction($this->getBackendUser()->workspace))
             ->removeByType(HiddenRestriction::class)
             ->removeByType(StartTimeRestriction::class)
             ->removeByType(EndTimeRestriction::class);
@@ -243,6 +251,10 @@ final class DatabaseRecordProvider implements SearchProviderInterface
 
         $items = [];
         $result = $queryBuilder->executeQuery();
+        $schema = $this->tcaSchemaFactory->get($tableName);
+        $rootLevelCapability = $schema->getCapability(TcaSchemaCapability::RestrictionRootLevel);
+        $hasWorkspaceCapability = $schema->hasCapability(TcaSchemaCapability::Workspace);
+
         while ($row = $result->fetchAssociative()) {
             BackendUtility::workspaceOL($tableName, $row);
             if (!is_array($row)) {
@@ -269,15 +281,16 @@ final class DatabaseRecordProvider implements SearchProviderInterface
             $extraData = [
                 'table' => $tableName,
                 'uid' => $row['uid'],
+                'inWorkspace' => $hasWorkspaceCapability && $row['t3ver_wsid'] > 0,
             ];
-            if (!($GLOBALS['TCA'][$tableName]['ctrl']['rootLevel'] ?? false)) {
+            if ($rootLevelCapability->canExistOnPages()) {
                 $extraData['breadcrumb'] = BackendUtility::getRecordPath($row['pid'], 'AND ' . $this->userPermissions, 0);
             }
 
             $icon = $this->iconFactory->getIconForRecord($tableName, $row, IconSize::SMALL);
             $items[] = (new ResultItem(self::class))
                 ->setItemTitle(BackendUtility::getRecordTitle($tableName, $row))
-                ->setTypeLabel($this->languageService->sL($GLOBALS['TCA'][$tableName]['ctrl']['title']))
+                ->setTypeLabel($schema->getTitle($this->languageService->sL(...)) ?: $tableName)
                 ->setIcon($icon)
                 ->setActions(...$actions)
                 ->setExtraData($extraData)
@@ -292,12 +305,15 @@ final class DatabaseRecordProvider implements SearchProviderInterface
 
     protected function canAccessTable(string $tableName): bool
     {
-        if (($GLOBALS['TCA'][$tableName]['ctrl']['hideTable'] ?? false)
-            || (
-                !$this->getBackendUser()->check('tables_select', $tableName)
-                && !$this->getBackendUser()->check('tables_modify', $tableName)
-            )
-        ) {
+        if (!$this->tcaSchemaFactory->has($tableName)) {
+            return true;
+        }
+        $schema = $this->tcaSchemaFactory->get($tableName);
+        if ($schema->hasCapability(TcaSchemaCapability::HideInUi)) {
+            return false;
+        }
+        if (!$this->getBackendUser()->check('tables_select', $tableName)
+            && !$this->getBackendUser()->check('tables_modify', $tableName)) {
             return false;
         }
 
@@ -306,7 +322,7 @@ final class DatabaseRecordProvider implements SearchProviderInterface
 
     protected function getAccessibleTables(BeforeSearchInDatabaseRecordProviderEvent $event): array
     {
-        return array_filter(array_keys($GLOBALS['TCA']), function (string $tableName) use ($event): bool {
+        return array_filter($this->tcaSchemaFactory->all()->getNames(), function (string $tableName) use ($event): bool {
             return $this->canAccessTable($tableName) && !$event->isTableIgnored($tableName);
         });
     }
@@ -333,120 +349,127 @@ final class DatabaseRecordProvider implements SearchProviderInterface
     }
 
     /**
-     * Get all fields from given table where we can search for.
-     *
-     * @return string[]
-     */
-    protected function extractSearchableFieldsFromTable(string $tableName): array
-    {
-        // Get the list of fields to search in from the TCA, if any
-        return $this->searchableSchemaFieldsCollector->getUniqueFieldList($tableName, [], $this->getBackendUser()->isAdmin());
-    }
-
-    /**
      * @return CompositeExpression[]
      */
     protected function buildConstraintsForTable(string $queryString, QueryBuilder $queryBuilder, string $tableName): array
     {
-        $fieldsToSearchWithin = $this->extractSearchableFieldsFromTable($tableName);
-        if ($fieldsToSearchWithin === []) {
-            return [];
-        }
-
+        $platform = $queryBuilder->getConnection()->getDatabasePlatform();
+        $isPostgres = $platform instanceof DoctrinePostgreSQLPlatform;
+        $fieldsToSearchWithin = $this->searchableSchemaFieldsCollector->getFields($tableName);
+        [$subSchemaDivisorFieldName, $fieldsSubSchemaTypes] = $this->searchableSchemaFieldsCollector->getSchemaFieldSubSchemaTypes($tableName);
         $constraints = [];
-
         // If the search string is a simple integer, assemble an equality comparison
         if (MathUtility::canBeInterpretedAsInteger($queryString)) {
-            foreach ($fieldsToSearchWithin as $fieldName) {
-                if ($fieldName !== 'uid'
-                    && $fieldName !== 'pid'
-                    && !isset($GLOBALS['TCA'][$tableName]['columns'][$fieldName])
-                ) {
-                    continue;
-                }
-                $fieldConfig = $GLOBALS['TCA'][$tableName]['columns'][$fieldName]['config'] ?? [];
-                $fieldType = $fieldConfig['type'] ?? '';
-
-                // Assemble the search condition only if the field is an integer, or is uid or pid
-                if ($fieldName === 'uid'
-                    || $fieldName === 'pid'
-                    || ($fieldType === 'number' && ($fieldConfig['format'] ?? 'integer') === 'integer')
-                    || ($fieldType === 'datetime' && !in_array($fieldConfig['dbType'] ?? '', QueryHelper::getDateTimeTypes(), true))
-                ) {
-                    $constraints[] = $queryBuilder->expr()->eq(
+            // Add uid and pid constraint
+            $constraints[] = $queryBuilder->expr()->eq(
+                'uid',
+                $queryBuilder->createNamedParameter($queryString, Connection::PARAM_INT)
+            );
+            $constraints[] = $queryBuilder->expr()->eq(
+                'pid',
+                $queryBuilder->createNamedParameter($queryString, Connection::PARAM_INT)
+            );
+            foreach ($fieldsToSearchWithin as $fieldName => $field) {
+                // Assemble the search condition only if the field is an integer
+                if ($field instanceof NumberFieldType || $field instanceof DateTimeFieldType) {
+                    $searchConstraint = $queryBuilder->expr()->eq(
                         $fieldName,
                         $queryBuilder->createNamedParameter($queryString, Connection::PARAM_INT)
                     );
-                } elseif ($this->fieldTypeIsSearchable($fieldType)) {
-                    // Otherwise and if the field makes sense to be searched, assemble a like condition
-                    $constraints[] = $queryBuilder->expr()->like(
+                } else {
+                    // Otherwise assemble a like condition
+                    $searchConstraint = $queryBuilder->expr()->like(
                         $fieldName,
                         $queryBuilder->createNamedParameter(
                             '%' . $queryBuilder->escapeLikeWildcards($queryString) . '%'
                         )
                     );
                 }
+
+                // If this table has subtypes (e.g. tt_content.CType), we want to ensure that only CType that contain
+                // e.g. "bodytext" in their list of fields, to search through them. This is important when a field
+                // is filled but its type has been changed.
+                if ($subSchemaDivisorFieldName !== ''
+                    && isset($fieldsSubSchemaTypes[$fieldName])
+                    && $fieldsSubSchemaTypes[$fieldName] !== []
+                ) {
+                    // Using `IN()` with a string-value quoted list is fine for all database systems, even when
+                    // used on integer-typed fields and no additional work required here to mitigate something.
+                    $searchConstraint = $queryBuilder->expr()->and(
+                        $searchConstraint,
+                        $queryBuilder->expr()->in(
+                            $subSchemaDivisorFieldName,
+                            $queryBuilder->quoteArrayBasedValueListToStringList($fieldsSubSchemaTypes[$fieldName])
+                        ),
+                    );
+                }
+
+                $constraints[] = $searchConstraint;
             }
         } else {
             $like = '%' . $queryBuilder->escapeLikeWildcards($queryString) . '%';
-            foreach ($fieldsToSearchWithin as $fieldName) {
-                if (!isset($GLOBALS['TCA'][$tableName]['columns'][$fieldName])) {
-                    continue;
-                }
-                $fieldConfig = $GLOBALS['TCA'][$tableName]['columns'][$fieldName]['config'] ?? [];
-                $fieldType = $fieldConfig['type'] ?? '';
+            foreach ($fieldsToSearchWithin as $fieldName => $field) {
+                $fieldConfig = $field->getConfiguration();
 
-                // Check whether search should be case-sensitive or not
-                $searchConstraint = $queryBuilder->expr()->and(
-                    $queryBuilder->expr()->comparison(
-                        'LOWER(' . $queryBuilder->quoteIdentifier($fieldName) . ')',
-                        'LIKE',
-                        $queryBuilder->createNamedParameter(mb_strtolower($like))
-                    )
+                // Enforce case-insensitive comparison by lower-casing field and value, unrelated to charset/collation
+                // on MySQL/MariaDB, for example if column collation is `utf8mb4_bin` - which would be case-sensitive.
+                $preparedFieldName = $isPostgres
+                    ? $queryBuilder->castFieldToTextType($fieldName)
+                    : $queryBuilder->quoteIdentifier($fieldName);
+                $searchConstraint = $queryBuilder->expr()->comparison(
+                    'LOWER(' . $preparedFieldName . ')',
+                    'LIKE',
+                    $queryBuilder->createNamedParameter(mb_strtolower($like))
                 );
 
                 if (is_array($fieldConfig['search'] ?? false)) {
                     if (in_array('case', $fieldConfig['search'], true)) {
-                        // Replace case insensitive default constraint
-                        $searchConstraint = $queryBuilder->expr()->and(
-                            $queryBuilder->expr()->like(
-                                $fieldName,
-                                $queryBuilder->createNamedParameter($like)
-                            )
+                        // Replace case-insensitive default constraint with semi case-sensitive constraint.
+                        // @todo This is not really ensured, without a suiting collation on the field (`*_bin`) AND also
+                        //       converting the like-value to the same binary collation, MySQL/MariaDB is not searching
+                        //       case-sensitive. ExpressionBuilder->like() and notLike() has been adjusted to use same
+                        //       case-insensitive search for PostgreSQL to adopt the same behaviour for the most cases.
+                        //       Making this here obsolete and interchangeable with the general enforcement above.
+                        // @todo TCA Field search option `case` cannot be enforced easily, which needs deeper analysis
+                        //       to find a possible way to do so - or deprecate the option at all.
+                        // https://docs.typo3.org/m/typo3/reference-tca/11.5/en-us/ColumnsConfig/CommonProperties/Search.html#confval-case
+                        $searchConstraint = $queryBuilder->expr()->like(
+                            $fieldName,
+                            $queryBuilder->createNamedParameter($like)
                         );
                     }
                     // Apply additional condition, if any
                     if ($fieldConfig['search']['andWhere'] ?? false) {
-                        $searchConstraint = $searchConstraint->with(
+                        $searchConstraint = $queryBuilder->expr()->and(
+                            $searchConstraint,
                             QueryHelper::stripLogicalOperatorPrefix(QueryHelper::quoteDatabaseIdentifiers($queryBuilder->getConnection(), $fieldConfig['search']['andWhere']))
                         );
                     }
                 }
-                // Assemble the search condition only if the field makes sense to be searched
-                if ($this->fieldTypeIsSearchable($fieldType) && $searchConstraint->count() !== 0) {
-                    $constraints[] = $searchConstraint;
+
+                // If this table has subtypes (e.g. tt_content.CType), we want to ensure that only CType that contain
+                // e.g. "bodytext" in their list of fields, to search through them. This is important when a field
+                // is filled but its type has been changed.
+                if ($subSchemaDivisorFieldName !== ''
+                    && isset($fieldsSubSchemaTypes[$fieldName])
+                    && $fieldsSubSchemaTypes[$fieldName] !== []
+                ) {
+                    // Using `IN()` with a string-value quoted list is fine for all database systems, even when
+                    // used on integer-typed fields and no additional work required here to mitigate something.
+                    $searchConstraint = $queryBuilder->expr()->and(
+                        $searchConstraint,
+                        $queryBuilder->expr()->in(
+                            $subSchemaDivisorFieldName,
+                            $queryBuilder->quoteArrayBasedValueListToStringList($fieldsSubSchemaTypes[$fieldName])
+                        ),
+                    );
                 }
+
+                $constraints[] = $searchConstraint;
             }
         }
 
         return $constraints;
-    }
-
-    protected function fieldTypeIsSearchable(string $fieldType): bool
-    {
-        $searchableFieldTypes = [
-            'input',
-            'text',
-            'json',
-            'flex',
-            'email',
-            'link',
-            'color',
-            'slug',
-            'uuid',
-        ];
-
-        return in_array($fieldType, $searchableFieldTypes, true);
     }
 
     /**
@@ -460,11 +483,12 @@ final class DatabaseRecordProvider implements SearchProviderInterface
         $backendUser = $this->getBackendUser();
         $showLink = '';
         $permissionSet = new Permission($this->getBackendUser()->calcPerms(BackendUtility::getRecord('pages', $row['pid']) ?? []));
+        $pagesSchema = $this->tcaSchemaFactory->get('pages');
         // "View" link - Only with proper permissions
         if ($backendUser->isAdmin()
             || (
                 $permissionSet->showPagePermissionIsGranted()
-                && !($GLOBALS['TCA']['pages']['ctrl']['adminOnly'] ?? false)
+                && !$pagesSchema->hasCapability(TcaSchemaCapability::AccessAdminOnly)
                 && $backendUser->check('tables_select', 'pages')
             )
         ) {
@@ -487,12 +511,13 @@ final class DatabaseRecordProvider implements SearchProviderInterface
         $editLink = '';
         $permissionSet = new Permission($backendUser->calcPerms(BackendUtility::readPageAccess($row['pid'], $this->userPermissions) ?: []));
         // "Edit" link - Only with proper edit permissions
-        if (!($GLOBALS['TCA'][$tableName]['ctrl']['readOnly'] ?? false)
+        $schema = $this->tcaSchemaFactory->get($tableName);
+        if (!$schema->hasCapability(TcaSchemaCapability::AccessReadOnly)
             && (
                 $backendUser->isAdmin()
                 || (
                     $permissionSet->editContentPermissionIsGranted()
-                    && !($GLOBALS['TCA'][$tableName]['ctrl']['adminOnly'] ?? false)
+                    && !$schema->hasCapability(TcaSchemaCapability::AccessAdminOnly)
                     && $backendUser->check('tables_modify', $tableName)
                     && $backendUser->recordEditAccessInternals($tableName, $row)
                 )

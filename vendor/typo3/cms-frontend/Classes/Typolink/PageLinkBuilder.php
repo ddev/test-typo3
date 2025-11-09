@@ -84,7 +84,7 @@ class PageLinkBuilder extends AbstractTypolinkBuilder
         // Link to page even if access is missing?
         $frontendTypoScriptConfigArray = $request->getAttribute('frontend.typoscript')?->getConfigArray();
         if (isset($conf['linkAccessRestrictedPages'])) {
-            $disableGroupAccessCheck = (bool)($conf['linkAccessRestrictedPages'] ?? false);
+            $disableGroupAccessCheck = (bool)$conf['linkAccessRestrictedPages'];
         } else {
             $disableGroupAccessCheck = (bool)($frontendTypoScriptConfigArray['typolinkLinkAccessRestrictedPages'] ?? false);
         }
@@ -190,6 +190,8 @@ class PageLinkBuilder extends AbstractTypolinkBuilder
             if (empty($url)) {
                 throw new UnableToLinkException('Link to external page "' . $page['uid'] . '" does not have a proper target URL, so "' . $linkText . '" was not linked.', 1551621999, null, $linkText);
             }
+        } elseif ((int)$page['doktype'] === PageRepository::DOKTYPE_SYSFOLDER || (int)$page['doktype'] === PageRepository::DOKTYPE_SPACER) {
+            throw new UnableToLinkException('Link to page of type ' . $page['doktype'] . ' is not possible.', 1742757285, null, $linkText);
         } else {
             // Generate the URL
             $url = $this->generateUrlForPageWithSiteConfiguration($page, $siteOfTargetPage, $queryParameters, $fragment, $conf);
@@ -283,7 +285,7 @@ class PageLinkBuilder extends AbstractTypolinkBuilder
             $queryParameters['type'] = $linkDetails['pagetype'];
         }
         $conf['no_cache'] = (string)$this->contentObjectRenderer->stdWrapValue('no_cache', $conf);
-        if ($conf['no_cache'] ?? false) {
+        if ($conf['no_cache']) {
             $queryParameters['no_cache'] = 1;
         }
         // Override language property if not being set already, supporting historically 'L' and
@@ -855,14 +857,8 @@ class PageLinkBuilder extends AbstractTypolinkBuilder
     {
         // clone global context object (singleton)
         $context = clone GeneralUtility::makeInstance(Context::class);
-        $context->setAspect(
-            'language',
-            $languageAspect ?? GeneralUtility::makeInstance(LanguageAspect::class)
-        );
-        return GeneralUtility::makeInstance(
-            PageRepository::class,
-            $context
-        );
+        $context->setAspect('language', $languageAspect ?? new LanguageAspect());
+        return GeneralUtility::makeInstance(PageRepository::class, $context);
     }
 
     protected function sendCacheTagEvent(array $page): void

@@ -46,6 +46,8 @@ use TYPO3\CMS\Core\Imaging\IconFactory;
 use TYPO3\CMS\Core\Imaging\IconSize;
 use TYPO3\CMS\Core\Localization\LanguageService;
 use TYPO3\CMS\Core\Page\PageRenderer;
+use TYPO3\CMS\Core\Schema\Capability\TcaSchemaCapability;
+use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 use TYPO3\CMS\Core\Type\Bitmask\Permission;
 use TYPO3\CMS\Core\Type\ContextualFeedbackSeverity;
 use TYPO3\CMS\Core\TypoScript\TypoScriptService;
@@ -81,6 +83,7 @@ class RecordListController
         protected readonly EventDispatcherInterface $eventDispatcher,
         protected readonly UriBuilder $uriBuilder,
         protected readonly ModuleTemplateFactory $moduleTemplateFactory,
+        protected readonly TcaSchemaFactory $tcaSchemaFactory,
     ) {}
 
     public function mainAction(ServerRequestInterface $request): ResponseInterface
@@ -114,19 +117,18 @@ class RecordListController
 
         // Check if Clipboard is allowed to be shown:
         if (($this->modTSconfig['enableClipBoard'] ?? '') === 'activated') {
+            $this->moduleData->set('clipBoard', true);
             $this->allowClipboard = false;
         } elseif (($this->modTSconfig['enableClipBoard'] ?? '') === 'selectable') {
             $this->allowClipboard = true;
         } elseif (($this->modTSconfig['enableClipBoard'] ?? '') === 'deactivated') {
+            $this->moduleData->set('clipBoard', false);
             $this->allowClipboard = false;
         }
 
         // Check if SearchBox is allowed to be shown:
-        if (!($this->modTSconfig['disableSearchBox'] ?? false)) {
-            $this->allowSearch = true;
-        } elseif ($this->modTSconfig['disableSearchBox'] ?? false) {
-            $this->allowSearch = false;
-        }
+        $this->allowSearch = !($this->modTSconfig['disableSearchBox'] ?? false);
+
         // Overwrite to show search on search request
         if (!empty($this->searchTerm)) {
             $this->allowSearch = true;
@@ -190,7 +192,7 @@ class RecordListController
             $pageTranslationsHtml = $this->renderPageTranslations($dbList, $siteLanguages);
         }
         $searchBoxHtml = '';
-        if ($this->allowSearch && $this->moduleData->get('searchBox') && ($tableListHtml || !empty($this->searchTerm))) {
+        if ($this->allowSearch && $this->moduleData->get('searchBox')) {
             $searchBoxHtml = $this->renderSearchBox($request, $dbList, $this->searchTerm, $search_levels);
         }
         $clipboardHtml = '';
@@ -293,8 +295,9 @@ class RecordListController
         $queryParams = $request->getQueryParams();
         $buttonBar = $view->getDocHeaderComponent()->getButtonBar();
         $lang = $this->getLanguageService();
-        // New record on pages that are not locked by editlock
-        if (!($this->modTSconfig['noCreateRecordsLink'] ?? false) && $this->editLockPermissions()) {
+        if ($table !== 'tt_content' && !($this->modTSconfig['noCreateRecordsLink'] ?? false) && $this->editLockPermissions()) {
+            // New record button if: table is not tt_content - tt_content should be managed in page module, link is
+            // not disabled via TSconfig, page is not 'edit locked'
             $newRecordButton = $buttonBar->makeLinkButton()
                 ->setHref((string)$this->uriBuilder->buildUriFromRoute('db_new', ['id' => $this->id, 'returnUrl' => $listUrl]))
                 ->setTitle($lang->sL('LLL:EXT:core/Resources/Private/Language/locallang_mod_web_list.xlf:newRecordGeneral'))
@@ -304,8 +307,9 @@ class RecordListController
         }
 
         if ($this->id !== 0) {
-            if ($this->canCreatePreviewLink()) {
-                $previewDataAttributes = PreviewUriBuilder::create((int)$this->id)
+            $uriBuilder = PreviewUriBuilder::create($this->pageInfo);
+            if ($uriBuilder->isPreviewable() && $this->canCreatePreviewLink()) {
+                $previewDataAttributes = PreviewUriBuilder::create($this->pageInfo)
                     ->withRootLine(BackendUtility::BEgetRootLine($this->id))
                     ->buildDispatcherDataAttributes();
                 $viewButton = $buttonBar->makeLinkButton()
@@ -536,6 +540,7 @@ class RecordListController
     /**
      * Returns the configuration of mod.web_list.noViewWithDokTypes or the
      * default value 254 (Sys Folders), if not set.
+     * @todo: this should vanish in favor of TCEMAIN.preview.disableButtonForDokType
      */
     protected function canCreatePreviewLink(): bool
     {
@@ -588,8 +593,9 @@ class RecordListController
         if (isset($this->modTSconfig['table.']['pages.']['hideTable'])) {
             return !$this->modTSconfig['table.']['pages.']['hideTable'];
         }
+        $schema = $this->tcaSchemaFactory->get('pages');
         $hideTables = $this->modTSconfig['hideTables'] ?? '';
-        return !($GLOBALS['TCA']['pages']['ctrl']['hideTable'] ?? false)
+        return !$schema->hasCapability(TcaSchemaCapability::HideInUi)
             && $hideTables !== '*'
             && !in_array('pages', GeneralUtility::trimExplode(',', $hideTables), true);
     }
@@ -627,14 +633,16 @@ class RecordListController
      */
     protected function isPageEditable(): bool
     {
-        if ($GLOBALS['TCA']['pages']['ctrl']['readOnly'] ?? false) {
+        $schema = $this->tcaSchemaFactory->get('pages');
+
+        if ($schema->hasCapability(TcaSchemaCapability::AccessReadOnly)) {
             return false;
         }
         $backendUser = $this->getBackendUserAuthentication();
         if ($backendUser->isAdmin()) {
             return true;
         }
-        if ($GLOBALS['TCA']['pages']['ctrl']['adminOnly'] ?? false) {
+        if ($schema->hasCapability(TcaSchemaCapability::AccessAdminOnly)) {
             return false;
         }
 

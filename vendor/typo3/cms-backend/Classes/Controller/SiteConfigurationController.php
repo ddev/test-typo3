@@ -47,6 +47,7 @@ use TYPO3\CMS\Core\Messaging\FlashMessage;
 use TYPO3\CMS\Core\Messaging\FlashMessageService;
 use TYPO3\CMS\Core\Page\PageRenderer;
 use TYPO3\CMS\Core\Site\Entity\Site;
+use TYPO3\CMS\Core\Site\Set\SetRegistry;
 use TYPO3\CMS\Core\Site\SiteFinder;
 use TYPO3\CMS\Core\SysLog\Action\Site as SiteAction;
 use TYPO3\CMS\Core\SysLog\Error as SystemLogErrorClassification;
@@ -75,6 +76,7 @@ class SiteConfigurationController
         private readonly SiteConfiguration $siteConfiguration,
         private readonly SiteWriter $siteWriter,
         private readonly NodeFactory $nodeFactory,
+        private readonly SetRegistry $setRegistry,
     ) {}
 
     /**
@@ -115,6 +117,7 @@ class SiteConfigurationController
             'unassignedSites' => $unassignedSites,
             'duplicatedRootPages' => $duplicatedRootPages,
             'duplicatedEntryPoints' => $this->getDuplicatedEntryPoints($allSites, $pages),
+            'invalidSets' => $this->setRegistry->getInvalidSets(),
         ]);
         return $view->renderResponse('SiteConfiguration/Overview');
     }
@@ -420,13 +423,13 @@ class SiteConfigurationController
             try {
                 if (!$isNewConfiguration && $currentIdentifier !== $siteIdentifier) {
                     $this->siteWriter->rename($currentIdentifier, $siteIdentifier);
-                    $this->getBackendUser()->writelog(Type::SITE, SiteAction::RENAME, SystemLogErrorClassification::MESSAGE, 0, 'Site configuration \'%s\' was renamed to \'%s\'.', [$currentIdentifier, $siteIdentifier], 'site');
+                    $this->getBackendUser()->writelog(Type::SITE, SiteAction::RENAME, SystemLogErrorClassification::MESSAGE, null, 'Site configuration \'%s\' was renamed to \'%s\'.', [$currentIdentifier, $siteIdentifier], 'site');
                 }
                 $this->siteWriter->write($siteIdentifier, $newSiteConfiguration, true);
                 if ($isNewConfiguration) {
-                    $this->getBackendUser()->writelog(Type::SITE, SiteAction::CREATE, SystemLogErrorClassification::MESSAGE, 0, 'Site configuration \'%s\' was created.', [$siteIdentifier], 'site');
+                    $this->getBackendUser()->writelog(Type::SITE, SiteAction::CREATE, SystemLogErrorClassification::MESSAGE, null, 'Site configuration \'%s\' was created.', [$siteIdentifier], 'site');
                 } else {
-                    $this->getBackendUser()->writelog(Type::SITE, SiteAction::UPDATE, SystemLogErrorClassification::MESSAGE, 0, 'Site configuration \'%s\' was updated.', [$siteIdentifier], 'site');
+                    $this->getBackendUser()->writelog(Type::SITE, SiteAction::UPDATE, SystemLogErrorClassification::MESSAGE, null, 'Site configuration \'%s\' was updated.', [$siteIdentifier], 'site');
                 }
             } catch (SiteConfigurationWriteException $e) {
                 $flashMessage = GeneralUtility::makeInstance(FlashMessage::class, $e->getMessage(), '', ContextualFeedbackSeverity::WARNING, true);
@@ -671,7 +674,7 @@ class SiteConfigurationController
         try {
             // Verify site does exist, method throws if not
             $this->siteWriter->delete($siteIdentifier);
-            $this->getBackendUser()->writelog(Type::SITE, SiteAction::DELETE, SystemLogErrorClassification::MESSAGE, 0, 'Site configuration \'%s\' was deleted.', [$siteIdentifier], 'site');
+            $this->getBackendUser()->writelog(Type::SITE, SiteAction::DELETE, SystemLogErrorClassification::MESSAGE, null, 'Site configuration \'%s\' was deleted.', [$siteIdentifier], 'site');
         } catch (SiteConfigurationWriteException $e) {
             $flashMessage = GeneralUtility::makeInstance(FlashMessage::class, $e->getMessage(), '', ContextualFeedbackSeverity::WARNING, true);
             $flashMessageService = GeneralUtility::makeInstance(FlashMessageService::class);

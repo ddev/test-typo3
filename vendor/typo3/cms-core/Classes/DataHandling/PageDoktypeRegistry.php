@@ -19,6 +19,7 @@ namespace TYPO3\CMS\Core\DataHandling;
 
 use Symfony\Component\DependencyInjection\Attribute\Autoconfigure;
 use TYPO3\CMS\Core\Domain\Repository\PageRepository;
+use TYPO3\CMS\Core\Schema\Struct\SelectItem;
 use TYPO3\CMS\Core\Schema\TcaSchemaFactory;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 
@@ -135,6 +136,24 @@ class PageDoktypeRegistry
     {
         $this->initializeTca();
         return $this->pageTypes;
+    }
+
+    /**
+     * @return SelectItem[]
+     */
+    public function getAllDoktypes(): array
+    {
+        $doktypeLabelMap = [];
+        $schema = $this->tcaSchemaFactory->get('pages');
+        // @todo Does not work for dynamic items, in case SubSchemaDivisorField is no StaticSelectFieldType!
+        foreach ($schema->getField($schema->getSubSchemaTypeInformation()->getFieldName())->getConfiguration()['items'] ?? [] as $doktypeItemConfig) {
+            $selectionItem = SelectItem::fromTcaItemArray($doktypeItemConfig);
+            if ($selectionItem->isDivider()) {
+                continue;
+            }
+            $doktypeLabelMap[] = $selectionItem;
+        }
+        return $doktypeLabelMap;
     }
 
     private function initializeTca(): void

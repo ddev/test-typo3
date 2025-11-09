@@ -29,7 +29,6 @@ prototypes:
               enableDeleteRow: true
               removeLastAvailableRowFlashMessageTitle: formEditor.elements.SelectionMixin.editor.options.removeLastAvailableRowFlashMessageTitle
               removeLastAvailableRowFlashMessageMessage: formEditor.elements.SelectionMixin.editor.options.removeLastAvailableRowFlashMessageMessage
-              shouldShowPreselectedValueColumn: single
               multiSelection: false
             700:
               identifier: gridColumnViewPortConfiguration
@@ -114,6 +113,7 @@ prototypes:
             properties:
               options: {  }
           label: formEditor.elements.RadioButton.label
+          description: formEditor.elements.RadioButton.description
           group: select
           groupSorting: 300
           iconIdentifier: form-radio-button
