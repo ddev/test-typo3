@@ -9,7 +9,6 @@ This repository is just for automated testing of DDEV.
 - Log in and edit the page "testpage" (Congratulations->testpage) to make sure the content has "This is test text for TestDdevFullSiteSetup".
 - `ddev export-db --file=.tarballs/db.sql --gzip=false`
 - `tar -czf .tarballs/db.sql.tar.gz -C .tarballs db.sql`
-- `cp .tarballs/Logo.png web/sites/default/files/`
 - `tar -czf .tarballs/files.tgz -C public/fileadmin/ .`
 - Run `git push`, create a new release adding `.tarballs/db.sql.tar.gz` and `.tarballs/files.tgz` as assets
 - Update the URLs in `ddev/ddev` ddevapp_test.go for the new release
