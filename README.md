@@ -7,6 +7,7 @@ This repository is just for automated testing of DDEV.
 - To update the repo: `ddev composer update --with-all-dependencies`- `git add -u` and `git add *`
 - Load the database and see if things are working.
 - Log in and edit the page "testpage" (Congratulations->testpage) to make sure the content has "This is test text for TestDdevFullSiteSetup".
+- `pushd public/fileadmin && ln -sf README.txt test.txt && popd`
 - `ddev export-db --file=.tarballs/db.sql --gzip=false`
 - `tar -czf .tarballs/db.sql.tar.gz -C .tarballs db.sql`
 - `tar -czf .tarballs/files.tgz -C public/fileadmin/ .`
